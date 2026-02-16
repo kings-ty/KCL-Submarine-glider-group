@@ -31,11 +31,26 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+
+// Structure to store glider sensor data values
+typedef struct {
+    float voltage;
+    float depth;
+    float o2;
+} GliderSensors;
+
+// Structure to manage overall glider state
+typedef struct {
+    GliderSensors sensors;
+    int status;
+    int tinyml_result;
+    bool is_motor_on;
+} GliderState;
 
 /* USER CODE END ET */
 
@@ -53,7 +68,9 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+void get_simulated_sensors(GliderSensors *sensors);
+void process_serial_command(uint8_t* buffer, uint16_t len);
+void send_log(const char* message);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
