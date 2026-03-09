@@ -1,10 +1,13 @@
 #include "app/app.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include "drivers/ms5837.h"
 
 // Handles created in main.c by CubeMX
 extern ADC_HandleTypeDef hadc1;
 extern I2C_HandleTypeDef hi2c1;
+extern I2C_HandleTypeDef hi2c2;
 extern TIM_HandleTypeDef htim1;
 
 // App state
@@ -17,6 +20,10 @@ static LinearActuator s_mass;
 // Subsystems
 static SystemCheckCtx s_sys;
 static MissionCtx s_mission;
+
+// Depth Sensor
+static MS5837_t s_depth_sensor;
+static uint8_t s_depth_sensor_ok = 0;
 
 // Scheduling
 static uint32_t s_last_fast = 0;
@@ -77,10 +84,10 @@ void App_Init(void)
     // INA  -> PB10
     // INB  -> PB11
     // ----------------------------
-    s_mass.motor.ina_port = GPIOB;
-    s_mass.motor.ina_pin  = GPIO_PIN_10;
+    s_mass.motor.ina_port = GPIOE;
+    s_mass.motor.ina_pin  = GPIO_PIN_9;
 
-    s_mass.motor.inb_port = GPIOB;
+    s_mass.motor.inb_port = GPIOE;
     s_mass.motor.inb_pin  = GPIO_PIN_11;
 
     s_mass.motor.htim_pwm    = &htim1;
@@ -99,6 +106,14 @@ void App_Init(void)
     SystemCheck_Init(&s_sys);
     Mission_Init(&s_mission);
 
+    // Initialize MS5837 Depth Sensor on hi2c2
+    s_depth_sensor_ok = MS5837_Init(&s_depth_sensor, &hi2c2);
+    if(s_depth_sensor_ok) {
+        send_log("[APP] MS5837 Depth sensor initialized successfully.\r\n");
+    } else {
+        send_log("[APP] MS5837 not found!\r\n");
+    }
+
     send_log("[APP] Init complete\r\n");
 }
 
@@ -113,10 +128,30 @@ void App_Tick(void)
         Act_Update(&s_buoy, now);
         Act_Update(&s_mass, now);
 
+        /* --- 5-Second Test Logic (Ignores System Check & Mission) --- */
+        /*
         if (!s_sys.done) {
             SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);
         } else {
             Mission_Update(&s_mission, now, &s_state, &s_buoy);
+        }
+        */
+
+        static uint32_t s_last_test = 0;
+        static bool is_extending = false;
+
+        if ((now - s_last_test) >= 3000) { // Toggle every 3 seconds
+            s_last_test = now;
+            
+            if (is_extending) {
+                Act_Retract(&s_buoy, now);
+                send_log("[TEST] Current Action: RETRACTING (3 sec)\r\n");
+                is_extending = false;
+            } else {
+                Act_Extend(&s_buoy, now);
+                send_log("[TEST] Current Action: EXTENDING (3 sec)\r\n");
+                is_extending = true;
+            }
         }
     }
 
@@ -125,6 +160,13 @@ void App_Tick(void)
         s_last_slow = now;
 
         get_simulated_sensors(&s_state.sensors);
+
+        // Override simulated depth with real MS5837 depth
+        if(s_depth_sensor_ok) {
+            MS5837_Read(&s_depth_sensor);
+            s_state.sensors.depth = s_depth_sensor.depth_m;
+        }
+
         s_state.status = rand() % 3;
         s_state.tinyml_result = rand() % 2;
 
