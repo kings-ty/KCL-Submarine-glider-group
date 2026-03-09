@@ -1,0 +1,133 @@
+#include "app/app.h"
+#include <stdio.h>
+#include <string.h>
+
+// Handles created in main.c by CubeMX
+extern ADC_HandleTypeDef hadc1;
+extern I2C_HandleTypeDef hi2c1;
+extern TIM_HandleTypeDef htim1;
+
+// App state
+static GliderState s_state;
+
+// Actuators
+static LinearActuator s_buoy;
+static LinearActuator s_mass;
+
+// Subsystems
+static SystemCheckCtx s_sys;
+static MissionCtx s_mission;
+
+// Scheduling
+static uint32_t s_last_fast = 0;
+static uint32_t s_last_slow = 0;
+
+GliderState* App_State(void)
+{
+    return &s_state;
+}
+
+static void App_LogTelemetry(void)
+{
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "V:%.2f D:%.2f O2:%.2f St:%d ML:%d Motor:%d\r\n",
+             s_state.sensors.voltage,
+             s_state.sensors.depth,
+             s_state.sensors.o2,
+             s_state.status,
+             s_state.tinyml_result,
+             (int)s_state.is_motor_on);
+    send_log(msg);
+}
+
+void App_Init(void)
+{
+    memset(&s_state, 0, sizeof(s_state));
+    s_state.status = 0;
+    s_state.is_motor_on = false;
+
+    uint32_t now = HAL_GetTick();
+
+    // ----------------------------
+    // Buoyancy actuator (DFR0601)
+    // PWM  -> PA8  (TIM1_CH1)
+    // INA  -> PB0
+    // INB  -> PB1
+    // ----------------------------
+    s_buoy.motor.ina_port = GPIOB;
+    s_buoy.motor.ina_pin  = GPIO_PIN_0;
+
+    s_buoy.motor.inb_port = GPIOB;
+    s_buoy.motor.inb_pin  = GPIO_PIN_1;
+
+    s_buoy.motor.htim_pwm    = &htim1;
+    s_buoy.motor.pwm_channel = TIM_CHANNEL_1;
+    s_buoy.motor.pwm_max     = 1000;
+
+    s_buoy.pwm_run = 600;
+    s_buoy.safety_timeout_ms = 12000;
+    s_buoy.has_pos = 0;   // RS PRO LD20 has no analog position feedback
+    s_buoy.hadc = NULL;
+    Act_Init(&s_buoy, now);
+
+    // ----------------------------
+    // Mass actuator (DFR0601)
+    // PWM  -> PA9  (TIM1_CH2)
+    // INA  -> PB10
+    // INB  -> PB11
+    // ----------------------------
+    s_mass.motor.ina_port = GPIOB;
+    s_mass.motor.ina_pin  = GPIO_PIN_10;
+
+    s_mass.motor.inb_port = GPIOB;
+    s_mass.motor.inb_pin  = GPIO_PIN_11;
+
+    s_mass.motor.htim_pwm    = &htim1;
+    s_mass.motor.pwm_channel = TIM_CHANNEL_2;
+    s_mass.motor.pwm_max     = 1000;
+
+    s_mass.pwm_run = 500;
+    s_mass.safety_timeout_ms = 8000;
+
+    // As Actuonix is L16-P, connect its feedback to an ADC channel.
+    s_mass.has_pos = 1;
+    s_mass.hadc = NULL;
+    Act_Init(&s_mass, now);
+
+    // System check + mission
+    SystemCheck_Init(&s_sys);
+    Mission_Init(&s_mission);
+
+    send_log("[APP] Init complete\r\n");
+}
+
+void App_Tick(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    // Fast tasks @ 20ms
+    if ((now - s_last_fast) >= 20) {
+        s_last_fast = now;
+
+        Act_Update(&s_buoy, now);
+        Act_Update(&s_mass, now);
+
+        if (!s_sys.done) {
+            SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);
+        } else {
+            Mission_Update(&s_mission, now, &s_state, &s_buoy);
+        }
+    }
+
+    // Slow tasks @ 1000ms
+    if ((now - s_last_slow) >= 1000) {
+        s_last_slow = now;
+
+        get_simulated_sensors(&s_state.sensors);
+        s_state.status = rand() % 3;
+        s_state.tinyml_result = rand() % 2;
+
+        App_LogTelemetry();
+    }
+}
