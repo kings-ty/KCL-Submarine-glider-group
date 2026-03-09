@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
+#include "app/app.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -299,7 +300,7 @@ int main(void)
                  adc_raw);
         send_log(tx_buffer);
 
-        HAL_Delay(1000);
+        // HAL_Delay(1000);
     }
 
     // --- 2. Other non-blocking tasks can be added here ---
