@@ -47,39 +47,31 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-GliderState g_glider_state; // Global glider state variable
-
-// --- Non-blocking Delay Variables ---
-uint32_t g_last_tx_time = 0;
-const uint32_t TX_INTERVAL_MS = 1000; // 1 second
-
-// --- IMU Variables ---
-uint8_t bno_data[6];
-int16_t raw_pitch, raw_roll, raw_yaw;
-float pitch, roll, yaw;
-uint8_t bno_i2c_addr = 0x28;  // Default address, will be updated if found
-
-// --- UART RX Handling Variables ---
-uint8_t g_rx_data;                        // 1-byte receive data
-uint8_t g_rx_buffer[RX_BUFFER_SIZE];      // Receive buffer
-uint16_t g_rx_index = 0;                  // Receive buffer index
+// UART RX (used if UART interrupt re-enabled)
+uint8_t g_rx_data;
+uint8_t g_rx_buffer[RX_BUFFER_SIZE];
+uint16_t g_rx_index = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -105,9 +97,6 @@ int main(void)
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
-  uint32_t adc_raw;      // ADC raw value (0~4095)
-  float oxygen_voltage;  // Voltage converted value (V)
-
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
@@ -126,102 +115,10 @@ int main(void)
   MX_TIM2_Init();
   MX_I2C1_Init();
   MX_ADC1_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
-  // Initialize glider state
-  memset(&g_glider_state, 0, sizeof(GliderState));
-  g_glider_state.status = 0; // 0: Normal
-  g_glider_state.is_motor_on = false;
-
-  // Initialize random seed
-  srand(HAL_GetTick());
-
-  // Start UART reception in interrupt mode
-  // HAL_UART_Receive_IT(&UART_HANDLE, &g_rx_data, 1);  // Temporarily disabled
-
-  send_log("--- TEST START 9600 BAUD ---\r\n");
-
-  // Scan I2C bus for devices
-  send_log("[I2C] Scanning bus...\r\n");
-  HAL_Delay(100);
-  int found = 0;
-  for(uint8_t addr = 1; addr < 128; addr++)
-  {
-      if(HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 1, 10) == HAL_OK)
-      {
-          char msg[50];
-          snprintf(msg, sizeof(msg), "[I2C] Device found at 0x%02X\r\n", addr);
-          send_log(msg);
-          found++;
-      }
-  }
-  if(found == 0)
-  {
-      send_log("[I2C] No devices found - check wiring!\r\n");
-  }
-
-  // Initialize BNO055 IMU
-  HAL_Delay(100);
-  uint8_t bno_id = 0;
-  
-  // Try address 0x28 first
-  if(HAL_I2C_Mem_Read(&hi2c1, (0x28 << 1), 0x00, 1, &bno_id, 1, 100) == HAL_OK && bno_id == 0xA0)
-  {
-      bno_i2c_addr = 0x28;
-      send_log("[IMU] BNO055 detected at 0x28\r\n");
-      
-      // Set to CONFIG mode
-      uint8_t config_mode = 0x00;
-      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &config_mode, 1, 100);
-      HAL_Delay(25);
-      
-      // Set to NDOF mode (9-axis fusion)
-      uint8_t ndof_mode = 0x0C;
-      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &ndof_mode, 1, 100);
-      HAL_Delay(100);  // Increased delay for sensor stabilization
-      
-      // Check current mode
-      uint8_t current_mode = 0;
-      HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &current_mode, 1, 100);
-      char mode_msg[50];
-      snprintf(mode_msg, sizeof(mode_msg), "[IMU] Mode: 0x%02X\r\n", current_mode);
-      send_log(mode_msg);
-      
-      // Check calibration status
-      uint8_t calib = 0;
-      HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x35, 1, &calib, 1, 100);
-      char calib_msg[50];
-      snprintf(calib_msg, sizeof(calib_msg), "[IMU] Calib: 0x%02X\r\n", calib);
-      send_log(calib_msg);
-      
-      send_log("[IMU] Initialized OK\r\n");
-  }
-  // Try address 0x29
-  else if(HAL_I2C_Mem_Read(&hi2c1, (0x29 << 1), 0x00, 1, &bno_id, 1, 100) == HAL_OK && bno_id == 0xA0)
-  {
-      bno_i2c_addr = 0x29;
-      send_log("[IMU] BNO055 detected at 0x29\r\n");
-      
-      uint8_t config_mode = 0x00;
-      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &config_mode, 1, 100);
-      HAL_Delay(25);
-      
-      uint8_t ndof_mode = 0x0C;
-      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &ndof_mode, 1, 100);
-      HAL_Delay(100);  // Increased delay
-      
-      // Check current mode
-      uint8_t current_mode = 0;
-      HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &current_mode, 1, 100);
-      char mode_msg[50];
-      snprintf(mode_msg, sizeof(mode_msg), "[IMU] Mode: 0x%02X\r\n", current_mode);
-      send_log(mode_msg);
-      
-      send_log("[IMU] Initialized OK at 0x29\r\n");
-  }
-  else
-  {
-      send_log("[IMU] Not found - check I2C connection\r\n");
-  }
+  MX_TIM1_Init();
+  App_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -231,79 +128,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // --- 1. Non-blocking sensor data transmission every second ---
-    uint32_t current_time = HAL_GetTick();
-    if (current_time - g_last_tx_time >= TX_INTERVAL_MS)
-    {
-        g_last_tx_time = current_time;
-
-        // 1. Read IMU data (use detected address)
-        HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x1A, 1, bno_data, 6, 100);
-        if(status == HAL_OK)
-        {
-            raw_yaw = (int16_t)((bno_data[1] << 8) | bno_data[0]);
-            raw_roll = (int16_t)((bno_data[3] << 8) | bno_data[2]);
-            raw_pitch = (int16_t)((bno_data[5] << 8) | bno_data[4]);
-            
-            yaw = (float)raw_yaw / 16.0f;
-            roll = (float)raw_roll / 16.0f;
-            pitch = (float)raw_pitch / 16.0f;
-            
-            // Debug: show raw data every time (no limit)
-            char dbg[100];
-            snprintf(dbg, sizeof(dbg), "[DBG] Raw: %d,%d,%d\r\n", raw_pitch, raw_roll, raw_yaw);
-            send_log(dbg);
-        }
-        else
-        {
-            // Debug: I2C read failed
-            static int err_count = 0;
-            if(err_count < 3)
-            {
-                send_log("[IMU] Read error\r\n");
-                err_count++;
-            }
-        }
-
-        // ADC Oxygen Sensor Reading
-        // 1. Start ADC
-        HAL_ADC_Start(&hadc1);
-
-        // 2. Wait for conversion complete (timeout 10ms)
-        if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
-        {
-            // 3. Read digital value (0 ~ 4095)
-            adc_raw = HAL_ADC_GetValue(&hadc1);
-
-            // 4. Convert to voltage value (3.3V reference)
-            // Formula: V = (ADC_Value * 3.3) / 4095
-            oxygen_voltage = (float)adc_raw * (3.3f / 4095.0f);
-        }
-        // 5. Stop ADC
-        HAL_ADC_Stop(&hadc1);
-
-        // 2. Get simulated sensor data
-        get_simulated_sensors(&g_glider_state.sensors);
-        g_glider_state.status = rand() % 3;
-        g_glider_state.tinyml_result = rand() % 2;
-
-        // 3. Format and send all data
-        char tx_buffer[256];
-        int len = snprintf(tx_buffer, sizeof(tx_buffer),
-                 "V:%.2f, D:%.2f, O2_V:%.4f, St:%d, ML:%d, P:%.2f, R:%.2f, Y:%.2f, O2_Raw:%lu\r\n",
-                 g_glider_state.sensors.voltage,
-                 g_glider_state.sensors.depth,
-                 oxygen_voltage,
-                 g_glider_state.status,
-                 g_glider_state.tinyml_result,
-                 pitch, roll, yaw,
-                 adc_raw);
-        send_log(tx_buffer);
-
-        // HAL_Delay(1000);
-    }
-
-    // --- 2. Other non-blocking tasks can be added here ---
+    App_Tick();
   }
   /* USER CODE END 3 */
 }
@@ -394,15 +219,60 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-
+  // PA0 must be ANALOG for ADC1_IN0 (O2 sensor)
+  GPIO_InitTypeDef GPIO_InitStruct_adc = {0};
+  GPIO_InitStruct_adc.Pin  = GPIO_PIN_0;
+  GPIO_InitStruct_adc.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct_adc.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct_adc);
   /* USER CODE END ADC1_Init 2 */
 
+}
+
+/**
+  * @brief ADC2 Initialization - PA1 = ADC2_IN1 for LD20 buoyancy potentiometer
+  *        Wire: LD20 Yellow -> 3.3V, LD20 White -> GND, LD20 Blue -> PA1
+  *        Output: 0-3.3V maps to 0-100mm stroke position
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  __HAL_RCC_ADC2_CLK_ENABLE();
+
+  hadc2.Instance                   = ADC2;
+  hadc2.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc2.Init.Resolution            = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode          = DISABLE;
+  hadc2.Init.ContinuousConvMode    = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc2.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
+  hadc2.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion       = 1;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK) { Error_Handler(); }
+
+  // 56-cycle sample time: needed because the LD20 pot has 10K source impedance
+  sConfig.Channel      = ADC_CHANNEL_1;
+  sConfig.Rank         = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK) { Error_Handler(); }
+
+  // PA1 must be in ANALOG mode for ADC to work correctly
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin  = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 /**
@@ -485,6 +355,57 @@ static void MX_TIM2_Init(void)
 }
 
 /**
+  * @brief TIM1 PWM Initialization (PA8=CH1 buoyancy, PA9=CH2 mass)
+  *        Prescaler=167 -> timer clock=1MHz, ARR=999 -> PWM=1kHz
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTime = {0};
+
+  __HAL_RCC_TIM1_CLK_ENABLE();
+
+  htim1.Instance               = TIM1;
+  htim1.Init.Prescaler         = 168 - 1;   // 168 MHz -> 1 MHz timer clock
+  htim1.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim1.Init.Period            = 999;        // 1 MHz / 1000 = 1 kHz PWM
+  htim1.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) { Error_Handler(); }
+
+  // TIM1 is an advanced timer: BDTR must be configured to enable output
+  sBreakDeadTime.OffStateRunMode  = TIM_OSSR_DISABLE;
+  sBreakDeadTime.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTime.LockLevel        = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTime.DeadTime         = 0;
+  sBreakDeadTime.BreakState       = TIM_BREAK_DISABLE;
+  sBreakDeadTime.BreakPolarity    = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTime.AutomaticOutput  = TIM_AUTOMATICOUTPUT_ENABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTime) != HAL_OK) { Error_Handler(); }
+
+  sConfigOC.OCMode      = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse       = 0;
+  sConfigOC.OCPolarity  = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode  = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState  = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) { Error_Handler(); }
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK) { Error_Handler(); }
+
+  // PA8 = TIM1_CH1 (AF1), PA9 = TIM1_CH2 (AF1)
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
+  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -535,25 +456,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin : PA1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  
-  // Configure PA0 as Trigger (Output) and PA1 as Echo (Input)
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  // PA0 = ADC1_IN0 (O2 sensor), PA1 = ADC2_IN1 (LD20 buoyancy pot)
+  // Both must be ANALOG - configured in MX_ADC1_Init / MX_ADC2_Init
 
 
   // Configure LED pins for STM32F407VET6 board
@@ -566,6 +471,18 @@ static void MX_GPIO_Init(void)
 
   // Turn off LEDs initially (HIGH = OFF for sink mode)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_SET);
+
+  // Motor driver direction pins (DFR0601)
+  // Buoyancy actuator: INA=PB0, INB=PB1
+  // Mass actuator:     INA=PB10, INB=PB11
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  GPIO_InitStruct.Pin   = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  // Start with both drivers stopped (INA=INB=0)
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11, GPIO_PIN_RESET);
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
@@ -627,12 +544,12 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
 
     if (strcmp((char*)buffer, "CMD:MOTOR_ON") == 0)
     {
-        g_glider_state.is_motor_on = true;
+        App_State()->is_motor_on = true;
         send_log("[CMD] Motor Started\r\n");
     }
     else if (strcmp((char*)buffer, "CMD:MOTOR_OFF") == 0)
     {
-        g_glider_state.is_motor_on = false;
+        App_State()->is_motor_on = false;
         send_log("[CMD] Motor Stopped\r\n");
     }
     else if (strcmp((char*)buffer, "CMD:LED_TOGGLE") == 0)

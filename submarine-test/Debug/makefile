@@ -15,6 +15,9 @@ RM := rm -rf
 -include Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/subdir.mk
 -include Drivers/STM32F4xx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
+-include Core/Src/drivers/subdir.mk
+-include Core/Src/app/subdir.mk
+-include Core/Src/actuators/subdir.mk
 -include Core/Src/subdir.mk
 -include objects.mk
 
@@ -70,8 +73,8 @@ all: main-build
 main-build: submarine-test.elf secondary-outputs
 
 # Tool invocations
-submarine-test.elf submarine-test.map: $(OBJS) $(USER_OBJS) /home/ty/submarine/submarine-test/STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "submarine-test.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/home/ty/submarine/submarine-test/STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="submarine-test.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+submarine-test.elf submarine-test.map: $(OBJS) $(USER_OBJS) /media/jusho/ESD-USB/kcl/group\ proj/sub_v2/KCL-Submarine-glider-group/submarine-test/STM32F407VETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "submarine-test.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/media/jusho/ESD-USB/kcl/group proj/sub_v2/KCL-Submarine-glider-group/submarine-test/STM32F407VETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="submarine-test.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
