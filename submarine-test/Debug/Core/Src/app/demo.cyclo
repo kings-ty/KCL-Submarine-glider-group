@@ -1,0 +1,3 @@
+../Core/Src/app/demo.c:12:13:advance	1
+../Core/Src/app/demo.c:22:6:Demo_Init	1
+../Core/Src/app/demo.c:29:6:Demo_Update	21
