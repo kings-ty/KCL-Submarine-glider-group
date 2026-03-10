@@ -1,4 +1,0 @@
-../Core/Src/app/app.c:32:14:App_State	4	static
-../Core/Src/app/app.c:37:13:App_LogTelemetry	264	static
-../Core/Src/app/app.c:51:6:App_Init	16	static
-../Core/Src/app/app.c:120:6:App_Tick	16	static

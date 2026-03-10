@@ -47,6 +47,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
@@ -57,33 +58,22 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-GliderState g_glider_state; // Global glider state variable
-
-// --- Non-blocking Delay Variables ---
-uint32_t g_last_tx_time = 0;
-const uint32_t TX_INTERVAL_MS = 1000; // 1 second
-
-// --- IMU Variables ---
-uint8_t bno_data[6];
-int16_t raw_pitch, raw_roll, raw_yaw;
-float pitch, roll, yaw;
-uint8_t bno_i2c_addr = 0x28;  // Default address, will be updated if found
-
-// --- UART RX Handling Variables ---
-uint8_t g_rx_data;                        // 1-byte receive data
-uint8_t g_rx_buffer[RX_BUFFER_SIZE];      // Receive buffer
-uint16_t g_rx_index = 0;                  // Receive buffer index
+// UART RX (used if UART interrupt re-enabled)
+uint8_t g_rx_data;
+uint8_t g_rx_buffer[RX_BUFFER_SIZE];
+uint16_t g_rx_index = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_ADC1_Init(void);
 static void MX_I2C2_Init(void);
-static void MX_TIM1_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -125,11 +115,12 @@ int main(void)
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   MX_USART2_UART_Init();
+  MX_TIM1_Init();
   MX_TIM2_Init();
   MX_I2C1_Init();
-  MX_ADC1_Init();
   MX_I2C2_Init();
-  MX_TIM1_Init();
+  MX_ADC1_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
   // Initialize glider state
   memset(&g_glider_state, 0, sizeof(GliderState));
@@ -138,8 +129,6 @@ int main(void)
 
   // Initialize random seed
   srand(HAL_GetTick());
-
-  App_Init();
 
   // Start UART reception in interrupt mode
   // HAL_UART_Receive_IT(&UART_HANDLE, &g_rx_data, 1);  // Temporarily disabled
@@ -238,7 +227,6 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Tick();
-
     // --- 1. Non-blocking sensor data transmission every second ---
     uint32_t current_time = HAL_GetTick();
     if (current_time - g_last_tx_time >= TX_INTERVAL_MS)
@@ -297,7 +285,7 @@ int main(void)
 
         // 3. Format and send all data
         char tx_buffer[256];
-        snprintf(tx_buffer, sizeof(tx_buffer),
+        int len = snprintf(tx_buffer, sizeof(tx_buffer),
                  "V:%.2f, D:%.2f, O2_V:%.4f, St:%d, ML:%d, P:%.2f, R:%.2f, Y:%.2f, O2_Raw:%lu\r\n",
                  g_glider_state.sensors.voltage,
                  g_glider_state.sensors.depth,
@@ -402,15 +390,60 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-
+  // PA0 must be ANALOG for ADC1_IN0 (O2 sensor)
+  GPIO_InitTypeDef GPIO_InitStruct_adc = {0};
+  GPIO_InitStruct_adc.Pin  = GPIO_PIN_0;
+  GPIO_InitStruct_adc.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct_adc.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct_adc);
   /* USER CODE END ADC1_Init 2 */
 
+}
+
+/**
+  * @brief ADC2 Initialization - PA1 = ADC2_IN1 for LD20 buoyancy potentiometer
+  *        Wire: LD20 Yellow -> 3.3V, LD20 White -> GND, LD20 Blue -> PA1
+  *        Output: 0-3.3V maps to 0-100mm stroke position
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  __HAL_RCC_ADC2_CLK_ENABLE();
+
+  hadc2.Instance                   = ADC2;
+  hadc2.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc2.Init.Resolution            = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode          = DISABLE;
+  hadc2.Init.ContinuousConvMode    = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc2.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
+  hadc2.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion       = 1;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK) { Error_Handler(); }
+
+  // 56-cycle sample time: needed because the LD20 pot has 10K source impedance
+  sConfig.Channel      = ADC_CHANNEL_1;
+  sConfig.Rank         = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK) { Error_Handler(); }
+
+  // PA1 must be in ANALOG mode for ADC to work correctly
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin  = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 /**
@@ -482,72 +515,54 @@ static void MX_I2C2_Init(void)
 }
 
 /**
-  * @brief TIM1 Initialization Function
-  * @param None
+  * @brief TIM1 PWM Initialization (PA8=CH1 buoyancy, PA9=CH2 mass)
+  *        Prescaler=167 -> timer clock=1MHz, ARR=999 -> PWM=1kHz
   * @retval None
   */
 static void MX_TIM1_Init(void)
 {
-
-  /* USER CODE BEGIN TIM1_Init 0 */
-
-  /* USER CODE END TIM1_Init 0 */
-
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTime = {0};
 
-  /* USER CODE BEGIN TIM1_Init 1 */
+  __HAL_RCC_TIM1_CLK_ENABLE();
 
-  /* USER CODE END TIM1_Init 1 */
-  htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 168-1;
-  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 1000;
-  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Instance               = TIM1;
+  htim1.Init.Prescaler         = 168 - 1;   // 168 MHz -> 1 MHz timer clock
+  htim1.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim1.Init.Period            = 999;        // 1 MHz / 1000 = 1 kHz PWM
+  htim1.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) { Error_Handler(); }
+
+  // TIM1 is an advanced timer: BDTR must be configured to enable output
+  sBreakDeadTime.OffStateRunMode  = TIM_OSSR_DISABLE;
+  sBreakDeadTime.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTime.LockLevel        = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTime.DeadTime         = 0;
+  sBreakDeadTime.BreakState       = TIM_BREAK_DISABLE;
+  sBreakDeadTime.BreakPolarity    = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTime.AutomaticOutput  = TIM_AUTOMATICOUTPUT_ENABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTime) != HAL_OK) { Error_Handler(); }
+
+  sConfigOC.OCMode      = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse       = 0;
+  sConfigOC.OCPolarity  = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCFastMode  = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState  = TIM_OCIDLESTATE_RESET;
   sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM1_Init 2 */
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) { Error_Handler(); }
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK) { Error_Handler(); }
 
-  /* USER CODE END TIM1_Init 2 */
-  HAL_TIM_MspPostInit(&htim1);
-
+  // PA8 = TIM1_CH1 (AF1), PA9 = TIM1_CH2 (AF1)
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
+  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 /**
@@ -646,13 +661,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_9|GPIO_PIN_11, GPIO_PIN_RESET);
-
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   /*Configure GPIO pin : PA1 */
   GPIO_InitStruct.Pin = GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -674,18 +683,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  
-  // Configure PA0 as Trigger (Output) and PA1 as Echo (Input)
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  // PA0 = ADC1_IN0 (O2 sensor), PA1 = ADC2_IN1 (LD20 buoyancy pot)
+  // Both must be ANALOG - configured in MX_ADC1_Init / MX_ADC2_Init
 
 
   // Configure LED pins for STM32F407VET6 board
@@ -698,6 +697,18 @@ static void MX_GPIO_Init(void)
 
   // Turn off LEDs initially (HIGH = OFF for sink mode)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_SET);
+
+  // Motor driver direction pins (DFR0601)
+  // Buoyancy actuator: INA=PB0, INB=PB1
+  // Mass actuator:     INA=PB10, INB=PB11
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  GPIO_InitStruct.Pin   = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  // Start with both drivers stopped (INA=INB=0)
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11, GPIO_PIN_RESET);
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
@@ -759,12 +770,12 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
 
     if (strcmp((char*)buffer, "CMD:MOTOR_ON") == 0)
     {
-        g_glider_state.is_motor_on = true;
+        App_State()->is_motor_on = true;
         send_log("[CMD] Motor Started\r\n");
     }
     else if (strcmp((char*)buffer, "CMD:MOTOR_OFF") == 0)
     {
-        g_glider_state.is_motor_on = false;
+        App_State()->is_motor_on = false;
         send_log("[CMD] Motor Stopped\r\n");
     }
     else if (strcmp((char*)buffer, "CMD:LED_TOGGLE") == 0)

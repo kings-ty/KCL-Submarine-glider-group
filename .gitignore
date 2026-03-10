@@ -1,1 +1,6 @@
 google-chrome-stable_current_amd64.deb
+debian-binary
+auto.py
+test_usb.py
+test.py
+water_quality1.csv

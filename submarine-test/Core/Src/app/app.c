@@ -1,11 +1,17 @@
 #include "app/app.h"
+#include "app/demo.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "drivers/ms5837.h"
 
+// Set to 1 to run the bench-test actuator demo (auto-starts, no serial command needed).
+// Set to 0 for normal mission mode (send "CMD:MOTOR_ON" via USB serial to start).
+#define DEMO_MODE  1
+
 // Handles created in main.c by CubeMX
-extern ADC_HandleTypeDef hadc1;
+extern ADC_HandleTypeDef hadc1;   // PA0 - O2 sensor (ADC1_IN0)
+extern ADC_HandleTypeDef hadc2;   // PA1 - LD20 buoyancy pot (ADC2_IN1)
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 extern TIM_HandleTypeDef htim1;
@@ -20,6 +26,7 @@ static LinearActuator s_mass;
 // Subsystems
 static SystemCheckCtx s_sys;
 static MissionCtx s_mission;
+static DemoCtx s_demo;
 
 // Depth Sensor
 static MS5837_t s_depth_sensor;
@@ -74,8 +81,10 @@ void App_Init(void)
 
     s_buoy.pwm_run = 600;
     s_buoy.safety_timeout_ms = 12000;
-    s_buoy.has_pos = 0;   // RS PRO LD20 has no analog position feedback
-    s_buoy.hadc = NULL;
+    // LD20 has a potentiometer: Blue wire -> PA1 (ADC2_IN1)
+    // Yellow -> 3.3V, White -> GND (not STM32 pins, use power header)
+    s_buoy.has_pos = 1;
+    s_buoy.hadc = &hadc2;
     Act_Init(&s_buoy, now);
 
     // ----------------------------
@@ -102,10 +111,9 @@ void App_Init(void)
     s_mass.hadc = NULL;
     Act_Init(&s_mass, now);
 
-    // System check + mission
+    // System check + mission/demo
     SystemCheck_Init(&s_sys);
     Mission_Init(&s_mission);
-
     // Initialize MS5837 Depth Sensor on hi2c2
     s_depth_sensor_ok = MS5837_Init(&s_depth_sensor, &hi2c2);
     if(s_depth_sensor_ok) {
@@ -114,7 +122,12 @@ void App_Init(void)
         send_log("[APP] MS5837 not found!\r\n");
     }
 
+#if DEMO_MODE
+    Demo_Init(&s_demo, now);
+    send_log("[APP] Init complete (DEMO MODE)\r\n");
+#else
     send_log("[APP] Init complete\r\n");
+#endif
 }
 
 void App_Tick(void)
@@ -128,7 +141,10 @@ void App_Tick(void)
         Act_Update(&s_buoy, now);
         Act_Update(&s_mass, now);
 
-        /* --- 5-Second Test Logic (Ignores System Check & Mission) --- */
+#if DEMO_MODE
+        Demo_Update(&s_demo, now, &s_buoy, &s_mass);
+#else
+        /* --- 3-Second Test Logic (Ignores System Check & Mission) --- */
         /*
         if (!s_sys.done) {
             SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);
@@ -153,6 +169,7 @@ void App_Tick(void)
                 is_extending = true;
             }
         }
+#endif
     }
 
     // Slow tasks @ 1000ms
