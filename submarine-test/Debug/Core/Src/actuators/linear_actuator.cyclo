@@ -1,0 +1,8 @@
+../Core/Src/actuators/linear_actuator.c:3:13:fault	1
+../Core/Src/actuators/linear_actuator.c:8:17:read_adc	2
+../Core/Src/actuators/linear_actuator.c:19:6:Act_Init	4
+../Core/Src/actuators/linear_actuator.c:28:6:Act_Extend	1
+../Core/Src/actuators/linear_actuator.c:34:6:Act_Retract	1
+../Core/Src/actuators/linear_actuator.c:40:6:Act_Stop	1
+../Core/Src/actuators/linear_actuator.c:45:6:Act_SetTargetADC	4
+../Core/Src/actuators/linear_actuator.c:55:6:Act_Update	10
