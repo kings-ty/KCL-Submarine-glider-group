@@ -1,5 +1,6 @@
 #include "app/app.h"
 #include "app/demo.h"
+#include "drivers/l298n_stepper.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -19,6 +20,9 @@ static GliderState s_state;
 // Actuators
 static LinearActuator s_buoy;
 static LinearActuator s_mass;
+
+// Stepper (mass rotation, L298N on PB12-PB15)
+static L298nStepper s_stepper;
 
 // Subsystems
 static SystemCheckCtx s_sys;
@@ -73,11 +77,18 @@ void App_Init(void)
     s_buoy.motor.pwm_max     = 1000;
 
     s_buoy.pwm_run = 600;
-    s_buoy.safety_timeout_ms = 12000;
+    s_buoy.safety_timeout_ms = 15000;
     // LD20 has a potentiometer: Blue wire -> PA1 (ADC2_IN1)
     // Yellow -> 3.3V, White -> GND (not STM32 pins, use power header)
+    // In DEMO_MODE run purely timed (no position feedback fighting the demo steps).
+    // Set has_pos=1 and hadc in normal mission mode when target_adc is properly set.
+#if DEMO_MODE
+    s_buoy.has_pos = 0;
+    s_buoy.hadc    = NULL;
+#else
     s_buoy.has_pos = 1;
-    s_buoy.hadc = &hadc2;
+    s_buoy.hadc    = &hadc2;
+#endif
     Act_Init(&s_buoy, now);
 
     // ----------------------------
@@ -104,6 +115,14 @@ void App_Init(void)
     s_mass.hadc = NULL;
     Act_Init(&s_mass, now);
 
+    // Stepper motor (L298N, mass rotation)
+    // IN1=PB12, IN2=PB13, IN3=PB14, IN4=PB15
+    s_stepper.in1_port = GPIOB; s_stepper.in1_pin = GPIO_PIN_12;
+    s_stepper.in2_port = GPIOB; s_stepper.in2_pin = GPIO_PIN_13;
+    s_stepper.in3_port = GPIOB; s_stepper.in3_pin = GPIO_PIN_14;
+    s_stepper.in4_port = GPIOB; s_stepper.in4_pin = GPIO_PIN_15;
+    Stepper_Init(&s_stepper);
+
     // System check + mission/demo
     SystemCheck_Init(&s_sys);
     Mission_Init(&s_mission);
@@ -127,7 +146,7 @@ void App_Tick(void)
         Act_Update(&s_mass, now);
 
 #if DEMO_MODE
-        Demo_Update(&s_demo, now, &s_buoy, &s_mass);
+        Demo_Update(&s_demo, now, &s_buoy, &s_mass, &s_stepper);
 #else
         if (!s_sys.done) {
             SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);

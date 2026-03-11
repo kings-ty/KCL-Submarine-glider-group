@@ -3,15 +3,17 @@
 #include <stdio.h>
 
 // Duration of each step in milliseconds
-#define EXTEND_BUOY_MS    3000
-#define RETRACT_BUOY_MS   3000
+#define EXTEND_BUOY_MS    12000
+#define RETRACT_BUOY_MS   12000
 #define EXTEND_MASS_MS    2000
 #define RETRACT_MASS_MS   2000
+#define STEP_FWD_MS       2000
+#define STEP_REV_MS       2000
 #define PAUSE_MS          1000
 
 static void advance(DemoCtx* d, uint32_t now_ms)
 {
-    d->step = (DemoStep)((d->step + 1) % 8);
+    d->step = (DemoStep)((d->step + 1) % 12);
     d->step_start_ms = now_ms;
 
     char msg[48];
@@ -26,7 +28,7 @@ void Demo_Init(DemoCtx* d, uint32_t now_ms)
     send_log("[DEMO] Starting actuator demo\r\n");
 }
 
-void Demo_Update(DemoCtx* d, uint32_t now_ms, LinearActuator* buoy, LinearActuator* mass)
+void Demo_Update(DemoCtx* d, uint32_t now_ms, LinearActuator* buoy, LinearActuator* mass, L298nStepper* stepper)
 {
     uint32_t elapsed = now_ms - d->step_start_ms;
 
@@ -89,10 +91,37 @@ void Demo_Update(DemoCtx* d, uint32_t now_ms, LinearActuator* buoy, LinearActuat
         break;
 
     case DEMO_PAUSE_4:
+        if (elapsed >= PAUSE_MS) advance(d, now_ms);
+        break;
+
+    case DEMO_STEP_FWD:
+        if (elapsed == 0) send_log("[DEMO] Stepper FWD\r\n");
+        Stepper_Step(stepper, STEP_FWD);
+        if (elapsed >= STEP_FWD_MS) {
+            Stepper_Stop(stepper);
+            advance(d, now_ms);
+        }
+        break;
+
+    case DEMO_PAUSE_5:
+        if (elapsed >= PAUSE_MS) advance(d, now_ms);
+        break;
+
+    case DEMO_STEP_REV:
+        if (elapsed == 0) send_log("[DEMO] Stepper REV\r\n");
+        Stepper_Step(stepper, STEP_REV);
+        if (elapsed >= STEP_REV_MS) {
+            Stepper_Stop(stepper);
+            advance(d, now_ms);
+        }
+        break;
+
+    case DEMO_PAUSE_6:
         if (elapsed >= PAUSE_MS) {
             send_log("[DEMO] Cycle complete, repeating\r\n");
             Act_Stop(buoy);
             Act_Stop(mass);
+            Stepper_Stop(stepper);
             advance(d, now_ms);
         }
         break;
