@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "usbd_cdc_if.h"
+#include "esp32_comm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -119,6 +120,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   MX_TIM1_Init();
   App_Init();
+  ESP32_Comm_Init(&huart2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -129,6 +131,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Tick();
+	ESP32_Comm_Process();
   }
   /* USER CODE END 3 */
 }
@@ -625,3 +628,4 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
