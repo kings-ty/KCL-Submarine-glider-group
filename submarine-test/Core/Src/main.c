@@ -572,7 +572,7 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
   * @retval None
   */
 /* USER CODE BEGIN 4 */
-// ... (기존 process_serial_command 등 유지) ...
+// ... (existed process_serial_command keep) ...
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -643,5 +643,6 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
 
 
