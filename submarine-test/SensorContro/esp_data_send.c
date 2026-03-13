@@ -1,7 +1,6 @@
 #include "LoRaWan_APP.h"
 #include "Arduino.h"
 #include <Wire.h>
-#include "MS5837.h"
 
 // 📡 LoRa Settings
 #define RF_FREQUENCY          868000000 
@@ -10,63 +9,71 @@
 #define LORA_SPREADING_FACTOR 7         
 #define LORA_CODINGRATE       1         
 #define LORA_PREAMBLE_LENGTH  8         
-#define NUM_SAMPLES 20
 
-HardwareSerial SerialSTM(2);
 static RadioEvents_t RadioEvents;
+HardwareSerial SerialSTM(2);
 
-float depthSamples[NUM_SAMPLES];
-float tempSamples[NUM_SAMPLES];
+// 🎛️ Sensor Configurations
+const int phPin = 1;        
+const int ecPin = 4;        
+const int analogDoPin = 5;  
+const int DO_I2C_ADDR = 0x61; 
+
+// 📊 평균 산출을 위한 샘플링 배열 및 변수
+const int NUM_SAMPLES = 20;
+int sampleCount = 0;
 float phSamples[NUM_SAMPLES];
 float ecSamples[NUM_SAMPLES];
 float aDoSamples[NUM_SAMPLES];
 float i2cO2Samples[NUM_SAMPLES];
 
-int sampleCount = 0; // One time Colleting sample count
-unsigned long lastReadTime = 0;
-// 🎛️ Sensor Configurations
-MS5837 depthSensor;
-const int phPin = 1;        // Analog pH (Blue)
-const int ecPin = 4;        // Analog EC (Black)
-const int analogDoPin = 5;  // Analog DO (Black) - Kept as backup/comparison
+// STM32에서 받아올 최신 수심/수온 데이터
+float latestDepth = 0.0;
+float latestTemp = 0.0;
+bool stmConnected = false;
 
-const int DO_I2C_ADDR = 0x61; // New I2C Oxygen Sensor Address (97)
+// ==========================================
+// 🧮 수학 함수: 정렬(Bubble Sort) 및 절사평균(Trimmed Mean)
+// ==========================================
+void sortArray(float* arr, int size) {
+  for (int i = 0; i < size - 1; ++i) {
+    for (int j = 0; j < size - i - 1; ++j) {
+      if (arr[j] > arr[j + 1]) {
+        float tmp = arr[j];
+        arr[j] = arr[j + 1];
+        arr[j + 1] = tmp;
+      }
+    }
+  }
+}
 
-// LoRa Tx Events
-void OnTxDone(void) {
-  Serial.println("[LoRa] Tx Success! Data sent over the air.\n");
+float getTrimmedMean(float* arr, int size, int trimCount) {
+  sortArray(arr, size);
+  float sum = 0;
+  int cnt = 0;
+  for (int i = trimCount; i < size - trimCount; ++i) {
+    sum += arr[i];
+    cnt++;
+  }
+  return sum / cnt; 
 }
-void OnTxTimeout(void) {
-  Serial.println("[LoRa] Tx Timeout! Failed to send.\n");
-}
+// ==========================================
+
+void OnTxDone(void) { Serial.println("[LoRa] Tx Success! Data sent.\n"); }
+void OnTxTimeout(void) { Serial.println("[LoRa] Tx Timeout! Failed.\n"); }
 
 void setup() {
   Serial.begin(115200);
-  SerialSTM.begin(115200, SERIAL_8n1, 18, 17);
-  Mcu.begin(); // Initialize Heltec board
+  SerialSTM.begin(115200, SERIAL_8N1, 18, 17);
+  Mcu.begin(0, 0); 
 
-  // 1. Enable Vext (Power for external sensors on V3)
   pinMode(45, OUTPUT);
   digitalWrite(45, LOW); 
   delay(100);
   
-  // 2. Initialize I2C (SDA: 41, SCL: 42)
-  // Both Depth Sensor and new Oxygen Sensor will share these pins
   Wire.begin(41, 42); 
-
-  // 3. Initialize Depth Sensor
-  if (!depthSensor.init()) {
-    Serial.println("[Warning] Depth sensor not found! Check I2C wiring.");
-  } else {
-    depthSensor.setModel(MS5837::MS5837_30BA);
-    depthSensor.setFluidDensity(1025); // Set to 1025 for Seawater
-    Serial.println("[OK] Depth sensor initialized.");
-  }
-
-  // 4. Set Analog Resolution to 12-bit (0~4095) for ESP32
   analogReadResolution(12); 
 
-  // 5. Initialize LoRa Radio
   RadioEvents.TxDone = OnTxDone;
   RadioEvents.TxTimeout = OnTxTimeout;
   Radio.Init(&RadioEvents);
@@ -76,80 +83,40 @@ void setup() {
                     LORA_PREAMBLE_LENGTH, false,
                     true, 0, 0, false, 3000);
 
-  Serial.println("\n--- Submarine Transmitter Ready (Dual O2 Mode) ---");
+  Serial.println("\n--- ESP32 Ready (20-Sample Average Mode) ---");
 }
-//Sort Array(bubble sort)
-void sortArray(float* arr, int size){
-  for(int i =0; i < size - 1; ++i){
-    for(int j=0; j < size -i-1; ++j){
-      if(arr[j] > arr[j+1]){
-        float tmp = arr[j];
-        arr[j] = arr[j + 1];
-        arr[j + 1] = tmp;
-      }
-    }
-  }
-}
-// except for n, make an mean(Trimmed Mean)
-float getTrimmedMean(float* arr, int size, int trimCount){
-  sortArray(arr, size);
-  float sum = 0;
-  int cnt = 0;
-  // top and bottom to sum
-  for(int i=trimCount; i<size-trimCount; ++i){
-    sum += arr[i];
-    cnt++;
-  }
-  return sum / cnt //Average
-}
-//Flag of Depth for Lora
-bool allowLoRaTx = false;
 
 void loop() {
   static uint32_t lastSendTime = 0;
 
-  //-------------------
-  // STM DATA RECEIVER
-  //-------------------
-  if(SerialSTM.available()){
-    //STM32 to read of \n
+  // 📥 1. STM32에서 들어오는 최신 수심 데이터 상시 수신 (1초에도 여러 번 들어올 수 있음)
+  while (SerialSTM.available()) {
     String incomingMsg = SerialSTM.readStringUntil('\n');
     incomingMsg.trim();
-    Serial.print("[The message come from STM32]:");
-    Serial.println(incomingMsg);
-    if (incomingMsg == "SEND_OK"){
-      allowLoRaTx = true;
-      Serial.println("👉 LoRa permission!");
-    }else if(incomingMsg == "SEND_NO"){
-      allowLoRaTx = false;
-      Serial.println("👉 LoRa banned!");
+    if (incomingMsg.startsWith("D:")) {
+      int commaIndex = incomingMsg.indexOf(',');
+      if (commaIndex > 0) {
+        latestDepth = incomingMsg.substring(2, commaIndex).toFloat();
+        latestTemp = incomingMsg.substring(commaIndex + 3).toFloat();
+        stmConnected = true;
+      }
     }
   }
-  // Send data every 3 seconds (3000ms)
+
+  // 📡 2. 3초마다 ESP32 센서 읽기
   if (millis() - lastSendTime > 3000) {
-    lastReadTime = millis();
-    // 1. Read Depth & Temperature
-    depthSensor.read();
-    depthSamples[sampleCount] = depthSensor.depth();
-    tempSamples[sampleCount] = depthSensor.temperature();
+    lastSendTime = millis(); 
+    
+    // 배열에 1개씩 데이터 쌓기
     phSamples[sampleCount] = analogRead(phPin) * (3.3 / 4095.0);
     ecSamples[sampleCount] = analogRead(ecPin) * (3.3 / 4095.0);
     aDoSamples[sampleCount] = analogRead(analogDoPin) * (3.3 / 4095.0);
-    // float depth = depthSensor.depth();
-    // float waterTemp = depthSensor.temperature();
 
-    // // 2. Read Analog Sensors (Convert to Voltage)
-    // float phVolt = analogRead(phPin) * (3.3 / 4095.0);
-    // float ecVolt = analogRead(ecPin) * (3.3 / 4095.0);
-    // float aDoVolt = analogRead(analogDoPin) * (3.3 / 4095.0);
-
-    // 3. Read New I2C Oxygen Sensor
+    // I2C 산소 센서 읽기
     Wire.beginTransmission(DO_I2C_ADDR);
-    Wire.write('R'); // Send 'Read' command
+    Wire.write('R'); 
     Wire.endTransmission();
-    
-    delay(600); // Wait 600ms for the sensor to process
-
+    delay(600); 
     Wire.requestFrom(DO_I2C_ADDR, 20);
     byte code = Wire.read();
     char do_data[20] = "";
@@ -157,39 +124,51 @@ void loop() {
     while (Wire.available() && i < 19) {
       do_data[i++] = Wire.read();
     }
-    do_data[i] = '\0'; // Null-terminate the string
+    do_data[i] = '\0'; 
 
-    if (code == 1) {
-      i2cO2Samples[sampleCount] = String(do_data).toFloat();
-      //Convert string to float
-    } else{
-      //Error occured -1
-      i2cO2Samples[sampleCount] = -1.0;
+    if (code == 1) { 
+      i2cO2Samples[sampleCount] = String(do_data).toFloat(); 
+    } else { 
+      i2cO2Samples[sampleCount] = -1.0; 
     }
+
     sampleCount++;
     Serial.print("Data Collected: "); Serial.print(sampleCount); Serial.println("/20");
-    // ==============================================
-    // 🖨️ Print Detailed Logs in English
-    // ==============================================
-    if (sampleCount >= NUM_SAMPLES){
 
-    
-    // 4. Create Payload String for Base Station
-    // Used 'aDO' for analog and 'O2' for the new I2C sensor
-    String dataMsg = "D:" + String(depth) + ",T:" + String(waterTemp) + 
-                     ",PH:" + String(phVolt) + ",EC:" + String(ecVolt) + 
-                     ",aDO:" + String(aDoVolt) + ",O2:" + i2cO2Str;
-    
-    Serial.print("[Tx Payload] => ");
-    Serial.println("\n[1 Min Avg Payload] => " + dataMsg);
-    // 5. Fire LoRa Radio!
-    Radio.Send((uint8_t *)dataMsg.c_str(), dataMsg.length());
-    // Fire STM32
-    SerialSTM.println(dataMsg);
-    sampleCount = 0;
+    // =========================================================
+    // 📈 3. 20개(1분치)가 모두 모였을 때 -> 평균 내서 전송!
+    // =========================================================
+    if (sampleCount >= NUM_SAMPLES) {
+      
+      // 위아래 2개씩 노이즈를 자르고(TrimCount=2) 평균 계산
+      float avgPh = getTrimmedMean(phSamples, NUM_SAMPLES, 2);
+      float avgEc = getTrimmedMean(ecSamples, NUM_SAMPLES, 2);
+      float avgADo = getTrimmedMean(aDoSamples, NUM_SAMPLES, 2);
+      float avgI2cO2 = getTrimmedMean(i2cO2Samples, NUM_SAMPLES, 2);
+
+      // 평균값으로 Payload 완성! (STM32의 최신 수심값 포함)
+      String dataMsg = "D:" + String(latestDepth) + ",T:" + String(latestTemp) + 
+                       ",PH:" + String(avgPh) + ",EC:" + String(avgEc) + 
+                       ",aDO:" + String(avgADo) + ",O2:" + String(avgI2cO2);
+      
+      Serial.println("\n=========================================");
+      Serial.println("[20-Sample Averaged Payload]");
+      Serial.println(dataMsg);
+      
+      // 🚀 Action A: LoRa로 기지국에 쏘기
+      Radio.Send((uint8_t *)dataMsg.c_str(), dataMsg.length());
+      
+      // 💾 Action B: STM32로 넘겨서 SD카드에 저장하라고 명령하기!
+      // 앞에 "SDLOG:" 라는 암호를 붙여서 보내면 STM32가 알아먹기 쉽지.
+      SerialSTM.println("SDLOG:" + dataMsg); 
+      
+      Serial.println("=========================================\n");
+
+      // 배열 카운트 초기화 (다음 1분을 위해)
+      sampleCount = 0;
     }
   }
 
-  // Essential background process for LoRa radio
+  // 필수: LoRa 백그라운드 프로세스
   Radio.IrqProcess(); 
 }
