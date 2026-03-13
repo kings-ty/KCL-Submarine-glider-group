@@ -3,8 +3,8 @@
 #include <stdio.h>
 
 // Duration of each step in milliseconds
-#define EXTEND_BUOY_MS    3000
-#define RETRACT_BUOY_MS   3000
+#define EXTEND_BUOY_MS    12000
+#define RETRACT_BUOY_MS   12000
 #define EXTEND_MASS_MS    2000
 #define RETRACT_MASS_MS   2000
 #define PAUSE_MS          1000
