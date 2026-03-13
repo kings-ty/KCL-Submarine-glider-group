@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "usbd_cdc_if.h"
+#include "esp32_comm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -119,6 +120,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   MX_TIM1_Init();
   App_Init();
+  ESP32_Comm_Init(&huart2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -129,6 +131,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Tick();
+	ESP32_Comm_Process();
   }
   /* USER CODE END 3 */
 }
@@ -578,6 +581,9 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
   * @param  huart: UART handle.
   * @retval None
   */
+/* USER CODE BEGIN 4 */
+// ... (existed process_serial_command keep) ...
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == UART_HANDLE.Instance)
@@ -587,7 +593,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         {
             if (g_rx_index > 0)
             {
-                process_serial_command(g_rx_buffer, g_rx_index);
+                g_rx_buffer[g_rx_index] = '\0'; // 문자열 마무리 (이 줄 꼭 추가!)
+
+                // 🌟 Distribution 🌟
+                if (strncmp((char*)g_rx_buffer, "CMD:", 4) == 0) {
+                    // "CMD:" Monitor for PC
+                    process_serial_command(g_rx_buffer, g_rx_index); 
+                } 
+                else if (strncmp((char*)g_rx_buffer, "D:", 2) == 0) {
+                    // "D:" Using ESP32
+                    ESP32_Process_Data((char*)g_rx_buffer); 
+                }
+
                 g_rx_index = 0;
                 memset(g_rx_buffer, 0, RX_BUFFER_SIZE);
             }
@@ -603,6 +620,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(&UART_HANDLE, &g_rx_data, 1);
     }
 }
+/* USER CODE END 4 */
 /* USER CODE END 4 */
 
 /**
@@ -635,3 +653,6 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+
