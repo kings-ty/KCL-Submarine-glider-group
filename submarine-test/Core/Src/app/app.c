@@ -26,7 +26,7 @@ static L298nStepper s_stepper;
 
 // Subsystems
 static SystemCheckCtx s_sys;
-static MissionCtx s_mission;
+static MotionCtx s_motion;
 static DemoCtx s_demo;
 
 // Scheduling
@@ -125,7 +125,7 @@ void App_Init(void)
 
     // System check + mission/demo
     SystemCheck_Init(&s_sys);
-    Mission_Init(&s_mission);
+    Motion_Init(&s_motion);
 #if DEMO_MODE
     Demo_Init(&s_demo, now);
     send_log("[APP] Init complete (DEMO MODE)\r\n");
@@ -151,7 +151,7 @@ void App_Tick(void)
         if (!s_sys.done) {
             SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);
         } else {
-            Mission_Update(&s_mission, now, &s_state, &s_buoy);
+            Motion_Update(&s_motion, now, &s_state, &s_buoy, &s_mass, &s_stepper);
         }
 #endif
     }

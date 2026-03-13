@@ -1,4 +1,0 @@
-../Core/Src/app/system_check.c:5:13:read_bno_id	1
-../Core/Src/app/system_check.c:11:17:adc_read_once	2
-../Core/Src/app/system_check.c:23:6:SystemCheck_Init	1
-../Core/Src/app/system_check.c:32:6:SystemCheck_Update	12

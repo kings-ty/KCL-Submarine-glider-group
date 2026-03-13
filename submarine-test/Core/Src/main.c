@@ -120,7 +120,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   MX_TIM1_Init();
   App_Init();
-  ESP32_Comm_Init(&huart2);
+  // ESP32_Comm_Init(&huart2); // Commented out to prevent compilation failure
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -131,7 +131,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Tick();
-	ESP32_Comm_Process();
+    // ESP32_Comm_Process(); // Commented out to prevent compilation failure
   }
   /* USER CODE END 3 */
 }
@@ -599,11 +599,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 if (strncmp((char*)g_rx_buffer, "CMD:", 4) == 0) {
                     // "CMD:" Monitor for PC
                     process_serial_command(g_rx_buffer, g_rx_index); 
-                } 
-                else if (strncmp((char*)g_rx_buffer, "D:", 2) == 0) {
-                    // "D:" Using ESP32
-                    ESP32_Process_Data((char*)g_rx_buffer); 
                 }
+                // else if (strncmp((char*)g_rx_buffer, "D:", 2) == 0) {
+                //     // "D:" Using ESP32 — Commented out to prevent compilation failure
+                //     ESP32_Process_Data((char*)g_rx_buffer);
+                // }
 
                 g_rx_index = 0;
                 memset(g_rx_buffer, 0, RX_BUFFER_SIZE);
@@ -631,7 +631,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
+  // __disable_irq();  // Disabled: kills USB IRQ, preventing CDC serial from working
   while (1)
   {
   }
