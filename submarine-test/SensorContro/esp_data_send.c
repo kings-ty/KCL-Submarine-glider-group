@@ -19,7 +19,7 @@ const int ecPin = 4;
 const int analogDoPin = 5;  
 const int DO_I2C_ADDR = 0x61; 
 
-// 📊 평균 산출을 위한 샘플링 배열 및 변수
+// 📊 Arrays and variables for averaging sensor samples
 const int NUM_SAMPLES = 20;
 int sampleCount = 0;
 float phSamples[NUM_SAMPLES];
@@ -27,13 +27,13 @@ float ecSamples[NUM_SAMPLES];
 float aDoSamples[NUM_SAMPLES];
 float i2cO2Samples[NUM_SAMPLES];
 
-// STM32에서 받아올 최신 수심/수온 데이터
+// Latest depth/temperature data from STM32
 float latestDepth = 0.0;
 float latestTemp = 0.0;
 bool stmConnected = false;
 
 // ==========================================
-// 🧮 수학 함수: 정렬(Bubble Sort) 및 절사평균(Trimmed Mean)
+// 🧮 Math functions: Bubble Sort and Trimmed Mean
 // ==========================================
 void sortArray(float* arr, int size) {
   for (int i = 0; i < size - 1; ++i) {
@@ -89,7 +89,7 @@ void setup() {
 void loop() {
   static uint32_t lastSendTime = 0;
 
-  // 📥 1. STM32에서 들어오는 최신 수심 데이터 상시 수신 (1초에도 여러 번 들어올 수 있음)
+  // 📥 1. Continuously receive the latest depth data from STM32 (may arrive multiple times per second)
   while (SerialSTM.available()) {
     String incomingMsg = SerialSTM.readStringUntil('\n');
     incomingMsg.trim();
@@ -103,16 +103,16 @@ void loop() {
     }
   }
 
-  // 📡 2. 3초마다 ESP32 센서 읽기
+  // 📡 2. Read ESP32 sensors every 3 seconds
   if (millis() - lastSendTime > 3000) {
     lastSendTime = millis(); 
     
-    // 배열에 1개씩 데이터 쌓기
+    // Store one sample in the arrays
     phSamples[sampleCount] = analogRead(phPin) * (3.3 / 4095.0);
     ecSamples[sampleCount] = analogRead(ecPin) * (3.3 / 4095.0);
     aDoSamples[sampleCount] = analogRead(analogDoPin) * (3.3 / 4095.0);
 
-    // I2C 산소 센서 읽기
+    // Read dissolved oxygen from I2C sensor
     Wire.beginTransmission(DO_I2C_ADDR);
     Wire.write('R'); 
     Wire.endTransmission();
@@ -136,17 +136,17 @@ void loop() {
     Serial.print("Data Collected: "); Serial.print(sampleCount); Serial.println("/20");
 
     // =========================================================
-    // 📈 3. 20개(1분치)가 모두 모였을 때 -> 평균 내서 전송!
+    // 📈 3. When 20 samples (1 minute worth) are collected -> calculate average and send!
     // =========================================================
     if (sampleCount >= NUM_SAMPLES) {
       
-      // 위아래 2개씩 노이즈를 자르고(TrimCount=2) 평균 계산
+      // Remove top/bottom 2 (TrimCount=2) for noise reduction, then calculate mean value
       float avgPh = getTrimmedMean(phSamples, NUM_SAMPLES, 2);
       float avgEc = getTrimmedMean(ecSamples, NUM_SAMPLES, 2);
       float avgADo = getTrimmedMean(aDoSamples, NUM_SAMPLES, 2);
       float avgI2cO2 = getTrimmedMean(i2cO2Samples, NUM_SAMPLES, 2);
 
-      // 평균값으로 Payload 완성! (STM32의 최신 수심값 포함)
+      // Create the payload with the averaged values (including latest STM32 depth)
       String dataMsg = "D:" + String(latestDepth) + ",T:" + String(latestTemp) + 
                        ",PH:" + String(avgPh) + ",EC:" + String(avgEc) + 
                        ",aDO:" + String(avgADo) + ",O2:" + String(avgI2cO2);
@@ -155,20 +155,20 @@ void loop() {
       Serial.println("[20-Sample Averaged Payload]");
       Serial.println(dataMsg);
       
-      // 🚀 Action A: LoRa로 기지국에 쏘기
+      // 🚀 Action A: Send to base station via LoRa
       Radio.Send((uint8_t *)dataMsg.c_str(), dataMsg.length());
       
-      // 💾 Action B: STM32로 넘겨서 SD카드에 저장하라고 명령하기!
-      // 앞에 "SDLOG:" 라는 암호를 붙여서 보내면 STM32가 알아먹기 쉽지.
+      // 💾 Action B: Send to STM32 to save to SD card!
+      // Add "SDLOG:" prefix to help STM32 recognize the command.
       SerialSTM.println("SDLOG:" + dataMsg); 
       
       Serial.println("=========================================\n");
 
-      // 배열 카운트 초기화 (다음 1분을 위해)
+      // Reset sample counter (for the next 1 minute)
       sampleCount = 0;
     }
   }
 
-  // 필수: LoRa 백그라운드 프로세스
+  // Must-have: LoRa background process
   Radio.IrqProcess(); 
 }
