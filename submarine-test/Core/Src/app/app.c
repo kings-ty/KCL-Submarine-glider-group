@@ -11,11 +11,11 @@
 
 // Handles created in main.c by CubeMX
 extern ADC_HandleTypeDef hadc1;   // PA0 - O2 sensor (ADC1_IN0)
-extern ADC_HandleTypeDef hadc2;   // PA1 - LD20 buoyancy pot (ADC2_IN1)
+//extern ADC_HandleTypeDef hadc2;   // PA1 - LD20 buoyancy pot (ADC2_IN1)
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 extern TIM_HandleTypeDef htim1;
-
+extern UART_HandleTypeDef huart3;
 // App state
 static GliderState s_state;
 
@@ -41,14 +41,43 @@ GliderState* App_State(void)
     return &s_state;
 }
 
+extern float yaw, roll, pitch;
+
 static void App_LogTelemetry(void)
 {
-    char msg[192];
+    char msg[256];
+    int v_int = (int)s_state.sensors.voltage;
+    int v_dec = (int)((s_state.sensors.voltage - v_int) * 100);
+    if (v_dec < 0) v_dec = -v_dec;
+
+    int d_int = (int)s_state.sensors.depth;
+    int d_dec = (int)((s_state.sensors.depth - d_int) * 100);
+    if (d_dec < 0) d_dec = -d_dec;
+
+    int o2_int = (int)s_state.sensors.o2;
+    int o2_dec = (int)((s_state.sensors.o2 - o2_int) * 100);
+    if (o2_dec < 0) o2_dec = -o2_dec;
+
+    int y_int = (int)yaw;
+    int y_dec = (int)((yaw - y_int) * 100);
+    if (y_dec < 0) y_dec = -y_dec;
+
+    int r_int = (int)roll;
+    int r_dec = (int)((roll - r_int) * 100);
+    if (r_dec < 0) r_dec = -r_dec;
+
+    int p_int = (int)pitch;
+    int p_dec = (int)((pitch - p_int) * 100);
+    if (p_dec < 0) p_dec = -p_dec;
+
     snprintf(msg, sizeof(msg),
-             "V:%.2f D:%.2f O2:%.2f St:%d ML:%d Motor:%d\r\n",
-             s_state.sensors.voltage,
-             s_state.sensors.depth,
-             s_state.sensors.o2,
+             "V:%d.%02d D:%d.%02d O2:%d.%02d | Y:%d.%02d R:%d.%02d P:%d.%02d | St:%d ML:%d Motor:%d\r\n",
+             v_int, v_dec,
+             d_int, d_dec,
+             o2_int, o2_dec,
+             y_int, y_dec,
+             r_int, r_dec,
+             p_int, p_dec,
              s_state.status,
              s_state.tinyml_result,
              (int)s_state.is_motor_on);
@@ -83,8 +112,8 @@ void App_Init(void)
     s_buoy.safety_timeout_ms = 12000;
     // LD20 has a potentiometer: Blue wire -> PA1 (ADC2_IN1)
     // Yellow -> 3.3V, White -> GND (not STM32 pins, use power header)
-    s_buoy.has_pos = 1;
-    s_buoy.hadc = &hadc2;
+    s_buoy.has_pos = 0;
+    s_buoy.hadc = NULL;
     Act_Init(&s_buoy, now);
 
     // ----------------------------
@@ -107,7 +136,7 @@ void App_Init(void)
     s_mass.safety_timeout_ms = 8000;
 
     // As Actuonix is L16-P, connect its feedback to an ADC channel.
-    s_mass.has_pos = 1;
+    s_mass.has_pos = 0;
     s_mass.hadc = NULL;
     Act_Init(&s_mass, now);
 
@@ -182,6 +211,11 @@ void App_Tick(void)
         if(s_depth_sensor_ok) {
             MS5837_Read(&s_depth_sensor);
             s_state.sensors.depth = s_depth_sensor.depth_m;
+            char esp_msg[64];
+            snprintf(esp_msg, sizeof(esp_msg), "D:%.2f,T:%.2f\n",
+                                 s_depth_sensor.depth_m,
+                                 s_depth_sensor.temperature_c);
+            HAL_UART_Transmit(&huart3, (uint8_t*)esp_msg, strlen(esp_msg), 50);
         }
 
         s_state.status = rand() % 3;

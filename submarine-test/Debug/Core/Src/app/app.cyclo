@@ -1,0 +1,4 @@
+../Core/Src/app/app.c:39:14:App_State	1
+../Core/Src/app/app.c:46:13:App_LogTelemetry	7
+../Core/Src/app/app.c:87:6:App_Init	2
+../Core/Src/app/app.c:162:6:App_Tick	4

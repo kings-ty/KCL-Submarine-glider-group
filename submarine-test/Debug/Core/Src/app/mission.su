@@ -1,0 +1,4 @@
+../Core/Src/app/mission.c:5:13:set_state	72	static
+../Core/Src/app/mission.c:15:6:Mission_Init	16	static
+../Core/Src/app/mission.c:26:6:Mission_Start	16	static
+../Core/Src/app/mission.c:32:6:Mission_Update	24	static

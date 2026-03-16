@@ -1,0 +1,4 @@
+../Core/Src/app/system_check.c:5:13:read_imu_id	2
+../Core/Src/app/system_check.c:13:17:adc_read_once	2
+../Core/Src/app/system_check.c:25:6:SystemCheck_Init	1
+../Core/Src/app/system_check.c:34:6:SystemCheck_Update	12
