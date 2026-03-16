@@ -68,6 +68,9 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
+
+volatile bool g_esp_line_received = false;
+char g_esp_process_buffer[RX_BUFFER_SIZE];
 GliderState g_glider_state; // Global glider state variable
 
 // --- Non-blocking Delay Variables ---
@@ -91,6 +94,7 @@ uint16_t g_rx_index = 0;
 uint8_t esp_rx_data;
 uint8_t esp_rx_buffer[RX_BUFFER_SIZE];
 uint16_t esp_rx_index = 0;
+uint32_t g_esp_total_bytes = 0; // ESP32 수신 총 바이트 수 확인용
 
 volatile bool g_line_received = false;
 char g_process_buffer[RX_BUFFER_SIZE];
@@ -333,20 +337,23 @@ int main(void)
     App_Tick();
 
     // --- TASK: Handle incoming serial data from PC or ESP32 ---
-    if (g_line_received)
-    {
-        if (strncmp(g_process_buffer, "SDLOG:", 6) == 0)
-        {
-            // ESP32가 보낸 통합 센서 데이터
-            ESP32_Process_Data(g_process_buffer);
-        }
-        else
-        {
-            // 기타 시리얼 명령 처리
+    if (g_line_received) {
             process_serial_command((uint8_t*)g_process_buffer, strlen(g_process_buffer));
+            g_line_received = false;
         }
-        g_line_received = false;
-    }
+
+        // --- 🌟 ESP32에서 온 모든 데이터 로그 찍기 🌟 ---
+        if (g_esp_line_received) {
+            // [1] 무엇이 왔는지 무조건 PC(UART2)로 출력!
+            char raw_log[RX_BUFFER_SIZE + 32];
+            snprintf(raw_log, sizeof(raw_log), ">>> [FROM ESP32]: %s\r\n", g_esp_process_buffer);
+            send_log(raw_log);
+
+            // [2] 기존의 데이터 분석(SDLOG 체크 등) 수행
+            ESP32_Process_Data(g_esp_process_buffer);
+
+            g_esp_line_received = false; // 처리 완료
+        }
 
     // --- 1. Non-blocking sensor data transmission every second ---
     uint32_t current_time = HAL_GetTick();
@@ -355,12 +362,16 @@ int main(void)
         g_last_tx_time = current_time;
 
         // --- TASK 1: Periodic Depth Reading & Transmission ---
-        // (Mock implementation for MS5837 under I2C1, put real reading function here)
         float ms5837_depth = 1.5f;
         float ms5837_temp = 20.3f;
         
+        int ms_d_int = (int)ms5837_depth;
+        int ms_d_dec = (int)((ms5837_depth - ms_d_int) * 100);
+        int ms_t_int = (int)ms5837_temp;
+        int ms_t_dec = (int)((ms5837_temp - ms_t_int) * 100);
+
         char depth_msg[50];
-        snprintf(depth_msg, sizeof(depth_msg), "D:%.2f,T:%.2f\n", ms5837_depth, ms5837_temp);
+        snprintf(depth_msg, sizeof(depth_msg), "D:%d.%02d,T:%d.%02d\n", ms_d_int, ms_d_dec, ms_t_int, ms_t_dec);
         HAL_UART_Transmit(&huart2, (uint8_t*)depth_msg, strlen(depth_msg), 100);
 
         // 1. Read IMU data
@@ -387,30 +398,27 @@ int main(void)
                 int16_t ax = (int16_t)((mpu_data[0] << 8) | mpu_data[1]);
                 int16_t ay = (int16_t)((mpu_data[2] << 8) | mpu_data[3]);
                 int16_t az = (int16_t)((mpu_data[4] << 8) | mpu_data[5]);
-                // int16_t temp = (int16_t)((mpu_data[6] << 8) | mpu_data[7]);
-                // int16_t gx = (int16_t)((mpu_data[8] << 8) | mpu_data[9]);
-                // int16_t gy = (int16_t)((mpu_data[10] << 8) | mpu_data[11]);
-                // int16_t gz = (int16_t)((mpu_data[12] << 8) | mpu_data[13]);
                 
-                // Simple Pitch/Roll from Accel
                 pitch = atan2f((float)ay, sqrtf((float)ax*ax + (float)az*az)) * 57.29578f;
                 roll  = atan2f(-(float)ax, (float)az) * 57.29578f;
                 
-                // Read Magnetometer for Yaw
                 uint8_t mag_status = 0;
                 HAL_I2C_Mem_Read(&hi2c1, (mag_i2c_addr << 1), 0x02, 1, &mag_status, 1, 100);
-                if(mag_status & 0x01) { // Data Ready
+                if(mag_status & 0x01) {
                     uint8_t mag_data[7];
                     if(HAL_I2C_Mem_Read(&hi2c1, (mag_i2c_addr << 1), 0x03, 1, mag_data, 7, 100) == HAL_OK) {
                         int16_t mx = (int16_t)((mag_data[1] << 8) | mag_data[0]);
                         int16_t my = (int16_t)((mag_data[3] << 8) | mag_data[2]);
-                        // int16_t mz = (int16_t)((mag_data[5] << 8) | mag_data[4]);
                         yaw = atan2f((float)my, (float)mx) * 57.29578f;
                     }
                 }
                 
+                int p_i = (int)pitch; int p_d = (int)((pitch - p_i) * 10); if(p_d < 0) p_d = -p_d;
+                int r_i = (int)roll;  int r_d = (int)((roll - r_i) * 10);  if(r_d < 0) r_d = -r_d;
+                int y_i = (int)yaw;   int y_d = (int)((yaw - y_i) * 10);   if(y_d < 0) y_d = -y_d;
+
                 char dbg[100];
-                snprintf(dbg, sizeof(dbg), "[MPU] Acc: %d,%d,%d | P:%.1f R:%.1f Y:%.1f\r\n", ax, ay, az, pitch, roll, yaw);
+                snprintf(dbg, sizeof(dbg), "[MPU] Acc: %d,%d,%d | P:%d.%d R:%d.%d Y:%d.%d\r\n", ax, ay, az, p_i, p_d, r_i, r_d, y_i, y_d);
                 send_log(dbg);
             }
         }
@@ -464,13 +472,14 @@ int main(void)
 
         char tx_buffer[256];
         snprintf(tx_buffer, sizeof(tx_buffer),
-                 "[TELEMETRY] Y:%d.%02d R:%d.%02d P:%d.%02d | D:%d.%02d V:%d.%02d | O2:%d.%03dV St:%d ML:%d ADC:%lu\r\n",
+                 "[TELEMETRY] Y:%d.%02d R:%d.%02d P:%d.%02d | D:%d.%02d V:%d.%02d | O2:%d.%03dV St:%d ML:%d ADC:%lu | ESP_RX:%lu\r\n",
                  y_int, y_dec, r_int, r_dec, p_int, p_dec,
                  d_int, d_dec, v_int, v_dec,
                  o2_v_int, o2_v_dec,
                  g_glider_state.status,
                  g_glider_state.tinyml_result,
-                 adc_raw);
+                 adc_raw,
+                 g_esp_total_bytes);
         send_log(tx_buffer);
 
         // HAL_Delay(1000);
@@ -1007,21 +1016,26 @@ static void MX_GPIO_Init(void)
   * @retval None
   */
 void ESP32_Process_Data(const char* data) {
-    // 1. "D:" 글자가 있는 위치 찾기 (데이터 형태: D:1.23,T:20.5...)
+    // 1. ESP32에서 온 전체 데이터 로그 출력 (짜식아 드디어 보여준다!)
+    char log_msg[RX_BUFFER_SIZE + 20];
+    snprintf(log_msg, sizeof(log_msg), "[ESP32_RAW] %s\r\n", data);
+    send_log(log_msg);
+
+    // 2. "D:" 글자가 있는 위치 찾기 (수심 체크 및 전송 제어)
     char *d_ptr = strstr(data, "D:");
-
     if (d_ptr != NULL) {
-        // 2. "D:" 바로 뒤에 있는 숫자(1.23)를 실수(float)로 변환
         float depth = atof(d_ptr + 2);
-
-        // 3. 수심 1m 이상이면 전송 허락, 아니면 차단!
         if (depth >= 1.0f) {
-            char msg[] = "SEND_OK\n";
-            HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
+            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_OK\n", 8, 100);
         } else {
-            char msg[] = "SEND_NO\n";
-            HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
+            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_NO\n", 8, 100);
         }
+    }
+
+    // 3. 만약 데이터에 "PH:"가 있다면 pH 값 추출 (옵션)
+    char *ph_ptr = strstr(data, "PH:");
+    if (ph_ptr != NULL) {
+        // g_glider_state.sensors.ph = atof(ph_ptr + 3); // PH 변수 추가 시 사용
     }
 }
 
@@ -1139,11 +1153,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             {
                 esp_rx_buffer[esp_rx_index] = '\0';
 
-                // ESP32에서 데이터가 오면, 똑같이 메인 루프(g_process_buffer)로 넘겨줍니다!
-                if (!g_line_received)
+                // ESP32에서 데이터가 오면, g_esp_process_buffer에 넣고 플래그 ON!
+                if (!g_esp_line_received)
                 {
-                    strncpy(g_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
-                    g_line_received = true; // 플래그 ON!
+                    strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
+                    g_esp_line_received = true; // 플래그 ON!
                 }
                 esp_rx_index = 0;
                 memset(esp_rx_buffer, 0, RX_BUFFER_SIZE);
@@ -1151,7 +1165,22 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         }
         else
         {
-            if (esp_rx_index < RX_BUFFER_SIZE - 1) esp_rx_buffer[esp_rx_index++] = esp_rx_data;
+            g_esp_total_bytes++; // 바이트 수 증가
+            if (esp_rx_index < RX_BUFFER_SIZE - 1) 
+            {
+                esp_rx_buffer[esp_rx_index++] = esp_rx_data;
+            }
+            else
+            {
+                // 버퍼가 꽉 찼을 경우 강제로 처리 (한 줄이 너무 길 때 대비)
+                esp_rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
+                if (!g_esp_line_received)
+                {
+                    strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
+                    g_esp_line_received = true;
+                }
+                esp_rx_index = 0;
+            }
         }
         HAL_UART_Receive_IT(&huart3, &esp_rx_data, 1);
     }
