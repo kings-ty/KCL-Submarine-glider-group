@@ -94,7 +94,7 @@ uint16_t g_rx_index = 0;
 uint8_t esp_rx_data;
 uint8_t esp_rx_buffer[RX_BUFFER_SIZE];
 uint16_t esp_rx_index = 0;
-uint32_t g_esp_total_bytes = 0; // ESP32 수신 총 바이트 수 확인용
+uint32_t g_esp_total_bytes = 0; // ESP32 total received bytes check
 
 volatile bool g_line_received = false;
 char g_process_buffer[RX_BUFFER_SIZE];
@@ -342,17 +342,17 @@ int main(void)
             g_line_received = false;
         }
 
-        // --- 🌟 ESP32에서 온 모든 데이터 로그 찍기 🌟 ---
+        // --- 🌟 Log all data coming from ESP32 🌟 ---
         if (g_esp_line_received) {
-            // [1] 무엇이 왔는지 무조건 PC(UART2)로 출력!
+            // [1] Print whatever comes in to PC(UART2) unconditionally!
             char raw_log[RX_BUFFER_SIZE + 32];
             snprintf(raw_log, sizeof(raw_log), ">>> [FROM ESP32]: %s\r\n", g_esp_process_buffer);
             send_log(raw_log);
 
-            // [2] 기존의 데이터 분석(SDLOG 체크 등) 수행
+            // [2] Perform existing data analysis (SDLOG check, etc.)
             ESP32_Process_Data(g_esp_process_buffer);
 
-            g_esp_line_received = false; // 처리 완료
+            g_esp_line_received = false; // Processing complete
         }
 
     // --- 1. Non-blocking sensor data transmission every second ---
@@ -1016,12 +1016,12 @@ static void MX_GPIO_Init(void)
   * @retval None
   */
 void ESP32_Process_Data(const char* data) {
-    // 1. ESP32에서 온 전체 데이터 로그 출력 (짜식아 드디어 보여준다!)
+    // 1. Print entire data log from ESP32 (Finally showing it!)
     char log_msg[RX_BUFFER_SIZE + 20];
     snprintf(log_msg, sizeof(log_msg), "[ESP32_RAW] %s\r\n", data);
     send_log(log_msg);
 
-    // 2. "D:" 글자가 있는 위치 찾기 (수심 체크 및 전송 제어)
+    // 2. Find position of "D:" string (Depth check and transmission control)
     char *d_ptr = strstr(data, "D:");
     if (d_ptr != NULL) {
         float depth = atof(d_ptr + 2);
@@ -1032,10 +1032,10 @@ void ESP32_Process_Data(const char* data) {
         }
     }
 
-    // 3. 만약 데이터에 "PH:"가 있다면 pH 값 추출 (옵션)
+    // 3. If "PH:" is in data, extract pH value (Optional)
     char *ph_ptr = strstr(data, "PH:");
     if (ph_ptr != NULL) {
-        // g_glider_state.sensors.ph = atof(ph_ptr + 3); // PH 변수 추가 시 사용
+        // g_glider_state.sensors.ph = atof(ph_ptr + 3); // Use when PH variable is added
     }
 }
 
@@ -1117,7 +1117,7 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     // =======================================================
-    // 1. PC 모니터링 및 명령어 수신 (huart2)
+    // 1. PC monitoring and command reception (huart2)
     // =======================================================
     if (huart->Instance == huart2.Instance)
     {
@@ -1143,7 +1143,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 
     // =======================================================
-    // 2. ESP32 센서 데이터 수신 (huart3) - 🌟 새로 추가됨 🌟
+    // 2. ESP32 sensor data reception (huart3) - 🌟 Newly added 🌟
     // =======================================================
     else if (huart->Instance == huart3.Instance)
     {
@@ -1153,11 +1153,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             {
                 esp_rx_buffer[esp_rx_index] = '\0';
 
-                // ESP32에서 데이터가 오면, g_esp_process_buffer에 넣고 플래그 ON!
+                // When data arrives from ESP32, put into g_esp_process_buffer and flag ON!
                 if (!g_esp_line_received)
                 {
                     strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
-                    g_esp_line_received = true; // 플래그 ON!
+                    g_esp_line_received = true; // Flag ON!
                 }
                 esp_rx_index = 0;
                 memset(esp_rx_buffer, 0, RX_BUFFER_SIZE);
@@ -1165,14 +1165,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         }
         else
         {
-            g_esp_total_bytes++; // 바이트 수 증가
+            g_esp_total_bytes++; // Increment byte count
             if (esp_rx_index < RX_BUFFER_SIZE - 1) 
             {
                 esp_rx_buffer[esp_rx_index++] = esp_rx_data;
             }
             else
             {
-                // 버퍼가 꽉 찼을 경우 강제로 처리 (한 줄이 너무 길 때 대비)
+                // Force processing if buffer is full (In case a line is too long)
                 esp_rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
                 if (!g_esp_line_received)
                 {
