@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "fatfs.h"
 #include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -25,8 +26,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <math.h>
 #include "usbd_cdc_if.h"
+#include "esp32_comm.h"
 #include "app/app.h"
+#include "fatfs.h" // For SD Logging (Uncomment after generating FATFS in CubeMX)
+
+extern RTC_HandleTypeDef hrtc; // (Uncomment after generating RTC in CubeMX)
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,7 +44,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define UART_HANDLE huart2
-#define RX_BUFFER_SIZE 64
+#define RX_BUFFER_SIZE 128
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,28 +58,52 @@ ADC_HandleTypeDef hadc1;
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 
+RTC_HandleTypeDef hrtc;
+
+SD_HandleTypeDef hsd;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
+
+volatile bool g_esp_line_received = false;
+char g_esp_process_buffer[RX_BUFFER_SIZE];
 GliderState g_glider_state; // Global glider state variable
 
 // --- Non-blocking Delay Variables ---
 uint32_t g_last_tx_time = 0;
-const uint32_t TX_INTERVAL_MS = 1000; // 1 second
+const uint32_t TX_INTERVAL_MS = 1000; // 1 second (Changed back from 1 minute)
 
 // --- IMU Variables ---
 uint8_t bno_data[6];
+uint8_t mpu_data[14];
 int16_t raw_pitch, raw_roll, raw_yaw;
 float pitch, roll, yaw;
-uint8_t bno_i2c_addr = 0x28;  // Default address, will be updated if found
+uint8_t bno_i2c_addr = 0x28;  // Default BNO055 address
+uint8_t mpu_i2c_addr = 0x69;  // MPU9250 address confirmed by user
+uint8_t mag_i2c_addr = 0x0C;  // MPU9250 Magnetometer address
+bool is_mpu9250 = false;
 
-// --- UART RX Handling Variables ---
-uint8_t g_rx_data;                        // 1-byte receive data
-uint8_t g_rx_buffer[RX_BUFFER_SIZE];      // Receive buffer
-uint16_t g_rx_index = 0;                  // Receive buffer index
+// UART RX (used if UART interrupt re-enabled)
+uint8_t g_rx_data;
+uint8_t g_rx_buffer[RX_BUFFER_SIZE];
+uint16_t g_rx_index = 0;
+uint8_t esp_rx_data;
+uint8_t esp_rx_buffer[RX_BUFFER_SIZE];
+uint16_t esp_rx_index = 0;
+uint32_t g_esp_total_bytes = 0; // ESP32 total received bytes check
+
+volatile bool g_line_received = false;
+char g_process_buffer[RX_BUFFER_SIZE];
+
+// Uncomment the below variables after generating FATFS in CubeMX
+// FATFS fs;
+// FIL file;
+// FRESULT fres;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -84,8 +115,12 @@ static void MX_I2C1_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_RTC_Init(void);
+static void MX_SDIO_SD_Init(void);
 /* USER CODE BEGIN PFP */
-
+void ESP32_Process_Data(const char* data);
+void send_log(const char* message);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -130,22 +165,30 @@ int main(void)
   MX_ADC1_Init();
   MX_I2C2_Init();
   MX_TIM1_Init();
+  MX_USART3_UART_Init();
+  MX_RTC_Init();
+  MX_SDIO_SD_Init();
+  MX_FATFS_Init();
+  /* USER CODE BEGIN 2 */
+  MX_TIM1_Init();
+  MX_USART3_UART_Init();
+  MX_RTC_Init();
+  MX_SDIO_SD_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   // Initialize glider state
   memset(&g_glider_state, 0, sizeof(GliderState));
   g_glider_state.status = 0; // 0: Normal
   g_glider_state.is_motor_on = false;
-
+  App_Init();
   // Initialize random seed
   srand(HAL_GetTick());
 
-  App_Init();
-
   // Start UART reception in interrupt mode
-  // HAL_UART_Receive_IT(&UART_HANDLE, &g_rx_data, 1);  // Temporarily disabled
+  HAL_UART_Receive_IT(&huart2, &g_rx_data, 1);
 
-  send_log("--- TEST START 9600 BAUD ---\r\n");
-
+  HAL_UART_Receive_IT(&huart3, &esp_rx_data, 1);
+  send_log("--- SYSTEM READY (115200 BAUD) ---\r\n");
   // Scan I2C bus for devices
   send_log("[I2C] Scanning bus...\r\n");
   HAL_Delay(100);
@@ -163,6 +206,11 @@ int main(void)
   if(found == 0)
   {
       send_log("[I2C] No devices found - check wiring!\r\n");
+  }
+
+  // Check detected addresses (0x0C, 0x69 might be MPU9250)
+  if (found > 0) {
+      send_log("[INFO] 0x69/0x0C detected? (Possible MPU9250)\r\n");
   }
 
   // Initialize BNO055 IMU
@@ -226,7 +274,63 @@ int main(void)
   }
   else
   {
-      send_log("[IMU] Not found - check I2C connection\r\n");
+      send_log("[IMU] BNO055 Not found (0x28/0x29) - Checking for MPU9250...\r\n");
+      
+      uint8_t mpu_id = 0;
+      // Try reading WHO_AM_I (0x75) from 0x69
+      HAL_StatusTypeDef mpu_status = HAL_I2C_Mem_Read(&hi2c1, (mpu_i2c_addr << 1), 0x75, 1, &mpu_id, 1, 100);
+      
+      if(mpu_status == HAL_OK && (mpu_id == 0x71 || mpu_id == 0x70 || mpu_id == 0x11))
+      {
+          is_mpu9250 = true;
+          char m_msg[50];
+          snprintf(m_msg, sizeof(m_msg), "[IMU] MPU9250 detected! ID: 0x%02X\r\n", mpu_id);
+          send_log(m_msg);
+          
+          uint8_t data = 0;
+          // Reset
+          data = 0x80;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x6B, 1, &data, 1, 100);
+          HAL_Delay(100);
+          
+          // Wake up, clock source auto
+          data = 0x01;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x6B, 1, &data, 1, 100);
+          HAL_Delay(10);
+          
+          // Config DLPF
+          data = 0x03;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x1A, 1, &data, 1, 100);
+          
+          // Gyro 2000 dps
+          data = 0x18;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x1B, 1, &data, 1, 100);
+          
+          // Accel 4g
+          data = 0x08;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x1C, 1, &data, 1, 100);
+          
+          // Enable I2C bypass for Magnetometer
+          data = 0x02;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x37, 1, &data, 1, 100);
+          HAL_Delay(10);
+          
+          // Init Magnetometer (AK8963)
+          data = 0x16; // 16-bit output, 100Hz continuous measurement
+          if(HAL_I2C_Mem_Write(&hi2c1, (mag_i2c_addr << 1), 0x0A, 1, &data, 1, 100) == HAL_OK)
+          {
+              send_log("[IMU] AK8963 Magnetometer initialized\r\n");
+          }
+          
+          send_log("[IMU] MPU9250 Initialized OK\r\n");
+      }
+      else
+      {
+          char err_msg[100];
+          snprintf(err_msg, sizeof(err_msg), "[IMU] MPU9250 Read Error! Status: %d, ID: 0x%02X\r\n", mpu_status, mpu_id);
+          send_log(err_msg);
+          send_log("[IMU] No IMU found! (BNO055/MPU9250)\r\n");
+      }
   }
   /* USER CODE END 2 */
 
@@ -239,37 +343,90 @@ int main(void)
     /* USER CODE BEGIN 3 */
     App_Tick();
 
+    // --- TASK: Handle incoming serial data from PC or ESP32 ---
+    if (g_line_received) {
+            process_serial_command((uint8_t*)g_process_buffer, strlen(g_process_buffer));
+            g_line_received = false;
+        }
+
+        // --- 🌟 Log all data coming from ESP32 🌟 ---
+        if (g_esp_line_received) {
+            // [1] Print whatever comes in to PC(UART2) unconditionally!
+            char raw_log[RX_BUFFER_SIZE + 32];
+            snprintf(raw_log, sizeof(raw_log), ">>> [FROM ESP32]: %s\r\n", g_esp_process_buffer);
+            send_log(raw_log);
+
+            // [2] Perform existing data analysis (SDLOG check, etc.)
+            ESP32_Process_Data(g_esp_process_buffer);
+
+            g_esp_line_received = false; // Processing complete
+        }
+
     // --- 1. Non-blocking sensor data transmission every second ---
     uint32_t current_time = HAL_GetTick();
     if (current_time - g_last_tx_time >= TX_INTERVAL_MS)
     {
         g_last_tx_time = current_time;
 
-        // 1. Read IMU data (use detected address)
-        HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x1A, 1, bno_data, 6, 100);
-        if(status == HAL_OK)
+        // --- TASK 1: Periodic Depth Reading & Transmission ---
+        float ms5837_depth = 1.5f;
+        float ms5837_temp = 20.3f;
+        
+        int ms_d_int = (int)ms5837_depth;
+        int ms_d_dec = (int)((ms5837_depth - ms_d_int) * 100);
+        int ms_t_int = (int)ms5837_temp;
+        int ms_t_dec = (int)((ms5837_temp - ms_t_int) * 100);
+
+        char depth_msg[50];
+        snprintf(depth_msg, sizeof(depth_msg), "D:%d.%02d,T:%d.%02d\n", ms_d_int, ms_d_dec, ms_t_int, ms_t_dec);
+        HAL_UART_Transmit(&huart2, (uint8_t*)depth_msg, strlen(depth_msg), 100);
+
+        // 1. Read IMU data
+        if (!is_mpu9250)
         {
-            raw_yaw = (int16_t)((bno_data[1] << 8) | bno_data[0]);
-            raw_roll = (int16_t)((bno_data[3] << 8) | bno_data[2]);
-            raw_pitch = (int16_t)((bno_data[5] << 8) | bno_data[4]);
-            
-            yaw = (float)raw_yaw / 16.0f;
-            roll = (float)raw_roll / 16.0f;
-            pitch = (float)raw_pitch / 16.0f;
-            
-            // Debug: show raw data every time (no limit)
-            char dbg[100];
-            snprintf(dbg, sizeof(dbg), "[DBG] Raw: %d,%d,%d\r\n", raw_pitch, raw_roll, raw_yaw);
-            send_log(dbg);
+            // BNO055 Reading
+            HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x1A, 1, bno_data, 6, 100);
+            if(status == HAL_OK)
+            {
+                raw_yaw   = (int16_t)((bno_data[1] << 8) | bno_data[0]);
+                raw_roll  = (int16_t)((bno_data[3] << 8) | bno_data[2]);
+                raw_pitch = (int16_t)((bno_data[5] << 8) | bno_data[4]);
+                
+                yaw   = (float)raw_yaw / 16.0f;
+                roll  = (float)raw_roll / 16.0f;
+                pitch = (float)raw_pitch / 16.0f;
+            }
         }
         else
         {
-            // Debug: I2C read failed
-            static int err_count = 0;
-            if(err_count < 3)
+            // MPU9250 Reading (Accel + Gyro)
+            if(HAL_I2C_Mem_Read(&hi2c1, (mpu_i2c_addr << 1), 0x3B, 1, mpu_data, 14, 100) == HAL_OK)
             {
-                send_log("[IMU] Read error\r\n");
-                err_count++;
+                int16_t ax = (int16_t)((mpu_data[0] << 8) | mpu_data[1]);
+                int16_t ay = (int16_t)((mpu_data[2] << 8) | mpu_data[3]);
+                int16_t az = (int16_t)((mpu_data[4] << 8) | mpu_data[5]);
+                
+                pitch = atan2f((float)ay, sqrtf((float)ax*ax + (float)az*az)) * 57.29578f;
+                roll  = atan2f(-(float)ax, (float)az) * 57.29578f;
+                
+                uint8_t mag_status = 0;
+                HAL_I2C_Mem_Read(&hi2c1, (mag_i2c_addr << 1), 0x02, 1, &mag_status, 1, 100);
+                if(mag_status & 0x01) {
+                    uint8_t mag_data[7];
+                    if(HAL_I2C_Mem_Read(&hi2c1, (mag_i2c_addr << 1), 0x03, 1, mag_data, 7, 100) == HAL_OK) {
+                        int16_t mx = (int16_t)((mag_data[1] << 8) | mag_data[0]);
+                        int16_t my = (int16_t)((mag_data[3] << 8) | mag_data[2]);
+                        yaw = atan2f((float)my, (float)mx) * 57.29578f;
+                    }
+                }
+                
+                int p_i = (int)pitch; int p_d = (int)((pitch - p_i) * 10); if(p_d < 0) p_d = -p_d;
+                int r_i = (int)roll;  int r_d = (int)((roll - r_i) * 10);  if(r_d < 0) r_d = -r_d;
+                int y_i = (int)yaw;   int y_d = (int)((yaw - y_i) * 10);   if(y_d < 0) y_d = -y_d;
+
+                char dbg[100];
+                snprintf(dbg, sizeof(dbg), "[MPU] Acc: %d,%d,%d | P:%d.%d R:%d.%d Y:%d.%d\r\n", ax, ay, az, p_i, p_d, r_i, r_d, y_i, y_d);
+                send_log(dbg);
             }
         }
 
@@ -295,17 +452,41 @@ int main(void)
         g_glider_state.status = rand() % 3;
         g_glider_state.tinyml_result = rand() % 2;
 
-        // 3. Format and send all data
+        // 3. Format and send all data (Manually format floats for compatibility)
+        int v_int = (int)g_glider_state.sensors.voltage;
+        int v_dec = (int)((g_glider_state.sensors.voltage - v_int) * 100);
+        if (v_dec < 0) v_dec = -v_dec;
+
+        int d_int = (int)g_glider_state.sensors.depth;
+        int d_dec = (int)((g_glider_state.sensors.depth - d_int) * 100);
+        if (d_dec < 0) d_dec = -d_dec;
+
+        int p_int = (int)pitch;
+        int p_dec = (int)((pitch - p_int) * 100);
+        if (p_dec < 0) p_dec = -p_dec;
+
+        int r_int = (int)roll;
+        int r_dec = (int)((roll - r_int) * 100);
+        if (r_dec < 0) r_dec = -r_dec;
+
+        int y_int = (int)yaw;
+        int y_dec = (int)((yaw - y_int) * 100);
+        if (y_dec < 0) y_dec = -y_dec;
+
+        int o2_v_int = (int)oxygen_voltage;
+        int o2_v_dec = (int)((oxygen_voltage - o2_v_int) * 1000); // 3 decimal places
+        if (o2_v_dec < 0) o2_v_dec = -o2_v_dec;
+
         char tx_buffer[256];
         snprintf(tx_buffer, sizeof(tx_buffer),
-                 "V:%.2f, D:%.2f, O2_V:%.4f, St:%d, ML:%d, P:%.2f, R:%.2f, Y:%.2f, O2_Raw:%lu\r\n",
-                 g_glider_state.sensors.voltage,
-                 g_glider_state.sensors.depth,
-                 oxygen_voltage,
+                 "[TELEMETRY] Y:%d.%02d R:%d.%02d P:%d.%02d | D:%d.%02d V:%d.%02d | O2:%d.%03dV St:%d ML:%d ADC:%lu | ESP_RX:%lu\r\n",
+                 y_int, y_dec, r_int, r_dec, p_int, p_dec,
+                 d_int, d_dec, v_int, v_dec,
+                 o2_v_int, o2_v_dec,
                  g_glider_state.status,
                  g_glider_state.tinyml_result,
-                 pitch, roll, yaw,
-                 adc_raw);
+                 adc_raw,
+                 g_esp_total_bytes);
         send_log(tx_buffer);
 
         // HAL_Delay(1000);
@@ -333,8 +514,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 8;
@@ -408,7 +590,12 @@ static void MX_ADC1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-
+  // PA0 must be ANALOG for ADC1_IN0 (O2 sensor)
+  GPIO_InitTypeDef GPIO_InitStruct_adc = {0};
+  GPIO_InitStruct_adc.Pin  = GPIO_PIN_0;
+  GPIO_InitStruct_adc.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct_adc.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct_adc);
   /* USER CODE END ADC1_Init 2 */
 
 }
@@ -478,6 +665,97 @@ static void MX_I2C2_Init(void)
   /* USER CODE BEGIN I2C2_Init 2 */
 
   /* USER CODE END I2C2_Init 2 */
+
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN Check_RTC_BKUP */
+
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date
+  */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
+  * @brief SDIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SDIO_SD_Init(void)
+{
+
+  /* USER CODE BEGIN SDIO_Init 0 */
+
+  /* USER CODE END SDIO_Init 0 */
+
+  /* USER CODE BEGIN SDIO_Init 1 */
+
+  /* USER CODE END SDIO_Init 1 */
+  hsd.Instance = SDIO;
+  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
+  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
+  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
+  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
+  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
+  hsd.Init.ClockDiv = 0;
+  /* USER CODE BEGIN SDIO_Init 2 */
+
+  /* USER CODE END SDIO_Init 2 */
 
 }
 
@@ -611,7 +889,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
+  huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -625,6 +903,39 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
 
 }
 
@@ -646,6 +957,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
@@ -674,18 +986,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  
-  // Configure PA0 as Trigger (Output) and PA1 as Echo (Input)
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  // PA0 = ADC1_IN0 (O2 sensor), PA1 = ADC2_IN1 (LD20 buoyancy pot)
+  // Both must be ANALOG - configured in MX_ADC1_Init / MX_ADC2_Init
 
 
   // Configure LED pins for STM32F407VET6 board
@@ -699,6 +1001,28 @@ static void MX_GPIO_Init(void)
   // Turn off LEDs initially (HIGH = OFF for sink mode)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_SET);
 
+  // Motor driver direction pins (DFR0601)
+  // Buoyancy actuator: INA=PB0, INB=PB1
+  // Mass actuator:     INA=PB10, INB=PB11
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  GPIO_InitStruct.Pin   = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  // Start with both drivers stopped (INA=INB=0)
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11, GPIO_PIN_RESET);
+
+  // Stepper motor direction pins (L298N)
+  // PB12=IN1, PB13=IN2, PB14=IN3, PB15=IN4
+  GPIO_InitStruct.Pin   = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  // De-energise all coils initially
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -708,6 +1032,30 @@ static void MX_GPIO_Init(void)
   * @param  message: The string to send.
   * @retval None
   */
+void ESP32_Process_Data(const char* data) {
+    // 1. Print entire data log from ESP32 (Finally showing it!)
+    char log_msg[RX_BUFFER_SIZE + 20];
+    snprintf(log_msg, sizeof(log_msg), "[ESP32_RAW] %s\r\n", data);
+    send_log(log_msg);
+
+    // 2. Find position of "D:" string (Depth check and transmission control)
+    char *d_ptr = strstr(data, "D:");
+    if (d_ptr != NULL) {
+        float depth = atof(d_ptr + 2);
+        if (depth >= 1.0f) {
+            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_OK\n", 8, 100);
+        } else {
+            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_NO\n", 8, 100);
+        }
+    }
+
+    // 3. If "PH:" is in data, extract pH value (Optional)
+    char *ph_ptr = strstr(data, "PH:");
+    if (ph_ptr != NULL) {
+        // g_glider_state.sensors.ph = atof(ph_ptr + 3); // Use when PH variable is added
+    }
+}
+
 void send_log(const char* message) {
     HAL_UART_Transmit(&UART_HANDLE, (uint8_t*)message, strlen(message), 100);
 	CDC_Transmit_FS((uint8_t*)message, strlen(message));
@@ -759,12 +1107,12 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
 
     if (strcmp((char*)buffer, "CMD:MOTOR_ON") == 0)
     {
-        g_glider_state.is_motor_on = true;
+        App_State()->is_motor_on = true;
         send_log("[CMD] Motor Started\r\n");
     }
     else if (strcmp((char*)buffer, "CMD:MOTOR_OFF") == 0)
     {
-        g_glider_state.is_motor_on = false;
+        App_State()->is_motor_on = false;
         send_log("[CMD] Motor Stopped\r\n");
     }
     else if (strcmp((char*)buffer, "CMD:LED_TOGGLE") == 0)
@@ -783,11 +1131,16 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
   * @param  huart: UART handle.
   * @retval None
   */
+/* USER CODE BEGIN 4 */
+// ... (existed process_serial_command keep) ...
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == UART_HANDLE.Instance)
+    // =======================================================
+    // 1. PC monitoring and command reception (huart2)
+    // =======================================================
+    if (huart->Instance == huart2.Instance)
     {
-        // On newline character, process the command
         if (g_rx_data == '\n' || g_rx_data == '\r')
         {
             if (g_rx_index > 0)
@@ -797,17 +1150,57 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 memset(g_rx_buffer, 0, RX_BUFFER_SIZE);
             }
         }
-        else // Otherwise, append to buffer
+        else
         {
-            if (g_rx_index < RX_BUFFER_SIZE - 1)
+            if (g_rx_index < RX_BUFFER_SIZE - 1) g_rx_buffer[g_rx_index++] = g_rx_data;
+        }
+        HAL_UART_Receive_IT(&huart2, &g_rx_data, 1);
+    }
+
+    // =======================================================
+    // 2. ESP32 sensor data reception (huart3) - 🌟 Newly added 🌟
+    // =======================================================
+    else if (huart->Instance == huart3.Instance)
+    {
+        if (esp_rx_data == '\n' || esp_rx_data == '\r')
+        {
+            if (esp_rx_index > 0)
             {
-                g_rx_buffer[g_rx_index++] = g_rx_data;
+                esp_rx_buffer[esp_rx_index] = '\0';
+
+                // When data arrives from ESP32, put into g_esp_process_buffer and flag ON!
+                if (!g_esp_line_received)
+                {
+                    strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
+                    g_esp_line_received = true; // Flag ON!
+                }
+                esp_rx_index = 0;
+                memset(esp_rx_buffer, 0, RX_BUFFER_SIZE);
             }
         }
-        // Re-arm UART reception interrupt
-        HAL_UART_Receive_IT(&UART_HANDLE, &g_rx_data, 1);
+        else
+        {
+            g_esp_total_bytes++; // Increment byte count
+            if (esp_rx_index < RX_BUFFER_SIZE - 1) 
+            {
+                esp_rx_buffer[esp_rx_index++] = esp_rx_data;
+            }
+            else
+            {
+                // Force processing if buffer is full (In case a line is too long)
+                esp_rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
+                if (!g_esp_line_received)
+                {
+                    strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
+                    g_esp_line_received = true;
+                }
+                esp_rx_index = 0;
+            }
+        }
+        HAL_UART_Receive_IT(&huart3, &esp_rx_data, 1);
     }
 }
+/* USER CODE END 4 */
 /* USER CODE END 4 */
 
 /**
@@ -818,7 +1211,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
+  // __disable_irq();  // Disabled: kills USB IRQ, preventing CDC serial from working
   while (1)
   {
   }
@@ -840,3 +1233,6 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+

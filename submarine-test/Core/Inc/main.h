@@ -42,6 +42,7 @@ typedef struct {
     float voltage;
     float depth;
     float o2;
+    float ph;
 } GliderSensors;
 
 // Structure to manage overall glider state

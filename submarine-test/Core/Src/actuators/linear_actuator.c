@@ -6,6 +6,7 @@ static void fault(LinearActuator* a){
 }
 
 static uint16_t read_adc(ADC_HandleTypeDef* hadc){
+  if (hadc == NULL) return 0;
   HAL_ADC_Start(hadc);
   if (HAL_ADC_PollForConversion(hadc, 5) != HAL_OK){
     HAL_ADC_Stop(hadc);

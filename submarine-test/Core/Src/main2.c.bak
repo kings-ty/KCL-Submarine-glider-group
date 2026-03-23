@@ -1,0 +1,633 @@
+#include "stm32f4xx_hal.h"
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
+// ==================== UART全局变量 ====================
+UART_HandleTypeDef huart2;
+
+// ==================== I2C全局变量 ====================
+I2C_HandleTypeDef hi2c1;
+uint8_t imu_initialized = 0;
+uint8_t icm20600_addr = 0x69;
+uint32_t i2c_error_count = 0;
+
+// ==================== ICM20600 定义 ====================
+#define ICM20600_WHO_AM_I 0x75
+#define ICM20600_WHO_AM_I_VALUE 0x11
+#define ICM20600_PWR_MGMT_1 0x6B
+#define ICM20600_PWR_MGMT_2 0x6C
+#define ICM20600_ACCEL_CONFIG 0x1C
+#define ICM20600_GYRO_CONFIG 0x1B
+#define ICM20600_CONFIG 0x1A
+#define ICM20600_ACCEL_XOUT_H 0x3B
+#define ICM20600_GYRO_XOUT_H 0x43
+#define ICM20600_TEMP_OUT_H 0x41
+
+// ==================== AK09918 定义 ====================
+#define AK09918_ADDRESS (0x0C << 1)
+#define AK09918_WIA1 0x00
+#define AK09918_WIA2 0x01
+#define AK09918_COMPANY_ID 0x48
+#define AK09918_DEVICE_ID 0x0C
+#define AK09918_HXL 0x11
+#define AK09918_CNTL2 0x31
+#define AK09918_CNTL1 0x30
+#define AK09918_ST1 0x10
+#define AK09918_ST2 0x18
+#define AK09918_MODE_POWER_DOWN 0x00
+#define AK09918_MODE_CONTINUOUS_10HZ 0x01
+#define AK09918_MODE_CONTINUOUS_20HZ 0x02
+#define AK09918_MODE_CONTINUOUS_50HZ 0x04
+#define AK09918_MODE_CONTINUOUS_100HZ 0x08
+
+// ==================== 数据类型定义 ====================
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+} imu_vector_t;
+
+typedef struct {
+    imu_vector_t accel;
+    imu_vector_t gyro;
+    imu_vector_t mag;
+    int16_t temperature;
+} imu_9dof_data_t;
+
+// ==================== 姿态数据结构 ====================
+typedef struct {
+    float roll;
+    float pitch;
+    float heading;
+} attitude_t;
+
+// ==================== 函数声明 ====================
+void SystemClock_Config(void);
+void I2C_Init(void);
+void I2C_RecoverBus(void);
+uint8_t ICM20600_Check(void);
+uint8_t ICM20600_Init(void);
+HAL_StatusTypeDef ICM20600_ReadAccel(imu_vector_t *accel);
+HAL_StatusTypeDef ICM20600_ReadGyro(imu_vector_t *gyro);
+HAL_StatusTypeDef ICM20600_ReadTemp(int16_t *temp);
+uint8_t AK09918_Check(void);
+uint8_t AK09918_Init(void);
+uint8_t AK09918_ReadMag(imu_vector_t *mag);
+uint8_t IMU_Init(void);
+uint8_t IMU_ReadAll(imu_9dof_data_t *data);
+void ConvertAndPrint(imu_9dof_data_t *data);
+void CalculateAttitude(imu_9dof_data_t *data, attitude_t *att);
+void PrintAttitude(attitude_t *att, imu_9dof_data_t *data);
+void I2C_Scan(void);
+
+// ==================== I2C读写函数 ====================
+uint8_t I2C_ReadReg(uint16_t dev_addr, uint8_t reg, uint8_t *data) {
+    return HAL_I2C_Mem_Read(&hi2c1, dev_addr, reg, I2C_MEMADD_SIZE_8BIT, data, 1, 100);
+}
+
+uint8_t I2C_WriteReg(uint16_t dev_addr, uint8_t reg, uint8_t data) {
+    return HAL_I2C_Mem_Write(&hi2c1, dev_addr, reg, I2C_MEMADD_SIZE_8BIT, &data, 1, 100);
+}
+
+uint8_t I2C_ReadRegs(uint16_t dev_addr, uint8_t reg, uint8_t *data, uint8_t len) {
+    return HAL_I2C_Mem_Read(&hi2c1, dev_addr, reg, I2C_MEMADD_SIZE_8BIT, data, len, 100);
+}
+
+// ==================== 重定向printf ====================
+int fputc(int ch, FILE *f) {
+    HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, 100);
+    return ch;
+}
+
+// ==================== I2C总线恢复函数 ====================
+void I2C_RecoverBus(void) {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    printf("\r\n⚠️ I2C bus error detected! Recovering...\r\n");
+
+    HAL_I2C_DeInit(&hi2c1);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    for(int i = 0; i < 9; i++) {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+        HAL_Delay(1);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
+        HAL_Delay(1);
+    }
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+    HAL_Delay(1);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+    HAL_Delay(1);
+
+    HAL_Delay(10);
+    I2C_Init();
+
+    printf("I2C bus recovered!\r\n");
+    i2c_error_count = 0;
+}
+
+// ==================== ICM20600 函数 ====================
+uint8_t ICM20600_Check(void) {
+    uint8_t who_am_i = 0;
+    char buf[64];
+
+    if (HAL_I2C_Mem_Read(&hi2c1, (0x68 << 1), ICM20600_WHO_AM_I,
+                         I2C_MEMADD_SIZE_8BIT, &who_am_i, 1, 100) == HAL_OK) {
+        if (who_am_i == ICM20600_WHO_AM_I_VALUE) {
+            icm20600_addr = 0x68;
+            sprintf(buf, "ICM20600 found at 0x68 (ID=0x%02X)\r\n", who_am_i);
+            HAL_UART_Transmit(&huart2, (uint8_t*)buf, strlen(buf), 100);
+            return 1;
+        }
+    }
+
+    if (HAL_I2C_Mem_Read(&hi2c1, (0x69 << 1), ICM20600_WHO_AM_I,
+                         I2C_MEMADD_SIZE_8BIT, &who_am_i, 1, 100) == HAL_OK) {
+        if (who_am_i == ICM20600_WHO_AM_I_VALUE) {
+            icm20600_addr = 0x69;
+            sprintf(buf, "ICM20600 found at 0x69 (ID=0x%02X)\r\n", who_am_i);
+            HAL_UART_Transmit(&huart2, (uint8_t*)buf, strlen(buf), 100);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint8_t ICM20600_Init(void) {
+    uint16_t dev_addr = icm20600_addr << 1;
+
+    printf("  Resetting...");
+    if (I2C_WriteReg(dev_addr, ICM20600_PWR_MGMT_1, 0x80) != HAL_OK) {
+        printf(" FAILED\r\n");
+        return 0;
+    }
+    printf(" OK\r\n");
+    HAL_Delay(100);
+
+    printf("  Waking up...");
+    if (I2C_WriteReg(dev_addr, ICM20600_PWR_MGMT_1, 0x01) != HAL_OK) {
+        printf(" FAILED\r\n");
+        return 0;
+    }
+    printf(" OK\r\n");
+    HAL_Delay(10);
+
+    printf("  Configuring gyro...");
+    I2C_WriteReg(dev_addr, ICM20600_GYRO_CONFIG, 0x18);
+    printf(" OK\r\n");
+
+    printf("  Configuring accel...");
+    I2C_WriteReg(dev_addr, ICM20600_ACCEL_CONFIG, 0x18);
+    printf(" OK\r\n");
+
+    printf("  Configuring filter...");
+    I2C_WriteReg(dev_addr, ICM20600_CONFIG, 0x01);
+    printf(" OK\r\n");
+
+    return 1;
+}
+
+HAL_StatusTypeDef ICM20600_ReadAccel(imu_vector_t *accel) {
+    uint16_t dev_addr = icm20600_addr << 1;
+    uint8_t data[6];
+    HAL_StatusTypeDef status = I2C_ReadRegs(dev_addr, ICM20600_ACCEL_XOUT_H, data, 6);
+
+    if (status == HAL_OK) {
+        accel->x = (int16_t)(data[0] << 8 | data[1]);
+        accel->y = (int16_t)(data[2] << 8 | data[3]);
+        accel->z = (int16_t)(data[4] << 8 | data[5]);
+    }
+    return status;
+}
+
+HAL_StatusTypeDef ICM20600_ReadGyro(imu_vector_t *gyro) {
+    uint16_t dev_addr = icm20600_addr << 1;
+    uint8_t data[6];
+    HAL_StatusTypeDef status = I2C_ReadRegs(dev_addr, ICM20600_GYRO_XOUT_H, data, 6);
+
+    if (status == HAL_OK) {
+        gyro->x = (int16_t)(data[0] << 8 | data[1]);
+        gyro->y = (int16_t)(data[2] << 8 | data[3]);
+        gyro->z = (int16_t)(data[4] << 8 | data[5]);
+    }
+    return status;
+}
+
+HAL_StatusTypeDef ICM20600_ReadTemp(int16_t *temp) {
+    uint16_t dev_addr = icm20600_addr << 1;
+    uint8_t data[2];
+    HAL_StatusTypeDef status = I2C_ReadRegs(dev_addr, ICM20600_TEMP_OUT_H, data, 2);
+
+    if (status == HAL_OK) {
+        *temp = (int16_t)(data[0] << 8 | data[1]);
+    }
+    return status;
+}
+
+// ==================== AK09918 函数 ====================
+uint8_t AK09918_Check(void) {
+    uint8_t company_id = 0;
+    uint8_t device_id = 0;
+    char buf[64];
+
+    if (HAL_I2C_Mem_Read(&hi2c1, AK09918_ADDRESS, AK09918_WIA1,
+                         I2C_MEMADD_SIZE_8BIT, &company_id, 1, 100) == HAL_OK) {
+        HAL_I2C_Mem_Read(&hi2c1, AK09918_ADDRESS, AK09918_WIA2,
+                         I2C_MEMADD_SIZE_8BIT, &device_id, 1, 100);
+
+        sprintf(buf, "AK09918 Company ID=0x%02X, Device ID=0x%02X\r\n", company_id, device_id);
+        HAL_UART_Transmit(&huart2, (uint8_t*)buf, strlen(buf), 100);
+
+        return (company_id == AK09918_COMPANY_ID && device_id == AK09918_DEVICE_ID);
+    }
+    return 0;
+}
+uint8_t AK09918_Init(void) {
+    uint8_t status;
+    uint8_t chip_id;
+    uint8_t cntl1_val;
+    uint8_t cntl2_val;
+    uint8_t test_val;
+
+    printf("\r\n=== AK09918 Debug ===\r\n");
+
+    // 先读取芯片ID确认通信
+    I2C_ReadReg(AK09918_ADDRESS, AK09918_WIA2, &chip_id);
+    printf("WIA2 = 0x%02X (should be 0x%02X)\r\n", chip_id, AK09918_DEVICE_ID);
+
+    if (chip_id != AK09918_DEVICE_ID) {
+        printf("❌ AK09918 ID mismatch!\r\n");
+        return 0;
+    }
+
+    // 读取所有相关寄存器
+    I2C_ReadReg(AK09918_ADDRESS, 0x31, &cntl2_val);
+    I2C_ReadReg(AK09918_ADDRESS, 0x30, &cntl1_val);
+    printf("Before init - CNTL1=0x%02X, CNTL2=0x%02X\r\n", cntl1_val, cntl2_val);
+
+    // 先软复位（如果有）
+    I2C_WriteReg(AK09918_ADDRESS, 0x32, 0x01);  // CNTL3 复位寄存器
+    HAL_Delay(10);
+
+    // 读取复位后的值
+    I2C_ReadReg(AK09918_ADDRESS, 0x31, &cntl2_val);
+    I2C_ReadReg(AK09918_ADDRESS, 0x30, &cntl1_val);
+    printf("After reset - CNTL1=0x%02X, CNTL2=0x%02X\r\n", cntl1_val, cntl2_val);
+
+    // 先进入掉电模式
+    printf("Setting power down mode...");
+    I2C_WriteReg(AK09918_ADDRESS, AK09918_CNTL2, AK09918_MODE_POWER_DOWN);
+    HAL_Delay(10);
+    I2C_ReadReg(AK09918_ADDRESS, 0x31, &cntl2_val);
+    printf(" CNTL2=0x%02X\r\n", cntl2_val);
+
+    // 设置为100Hz连续测量模式
+    printf("Setting continuous mode 100Hz...");
+    if (I2C_WriteReg(AK09918_ADDRESS, AK09918_CNTL2, AK09918_MODE_CONTINUOUS_100HZ) != HAL_OK) {
+        printf(" FAILED\r\n");
+        return 0;
+    }
+    HAL_Delay(10);
+
+    // 读取控制寄存器确认
+    I2C_ReadReg(AK09918_ADDRESS, AK09918_CNTL2, &status);
+    printf(" CNTL2=0x%02X ", status);
+
+    // 读取 CNTL1 寄存器
+    I2C_ReadReg(AK09918_ADDRESS, AK09918_CNTL1, &cntl1_val);
+    printf("CNTL1=0x%02X\r\n", cntl1_val);
+
+    // 尝试写入测试值到某个寄存器（验证写功能）
+    I2C_WriteReg(AK09918_ADDRESS, 0x30, 0x5A);
+    HAL_Delay(1);
+    I2C_ReadReg(AK09918_ADDRESS, 0x30, &test_val);
+    printf("Write test - wrote 0x5A, read 0x%02X\r\n", test_val);
+
+    // 恢复设置
+    I2C_WriteReg(AK09918_ADDRESS, 0x30, cntl1_val);
+
+    printf("=== End Debug ===\r\n");
+
+    return (status == AK09918_MODE_CONTINUOUS_100HZ);
+}
+uint8_t AK09918_ReadMag(imu_vector_t *mag) {
+    uint8_t data[6];
+    uint8_t st1, st2;
+
+    // 读取状态寄存器
+    I2C_ReadReg(AK09918_ADDRESS, AK09918_ST1, &st1);
+
+    if (!(st1 & 0x01)) {
+        static uint32_t no_data_cnt = 0;
+        if (no_data_cnt++ % 50 == 0) {
+            printf("No mag data (ST1=0x%02X)\r\n", st1);
+        }
+        return 0;
+    }
+
+    if (I2C_ReadRegs(AK09918_ADDRESS, AK09918_HXL, data, 6) == HAL_OK) {
+        mag->x = (int16_t)(data[1] << 8 | data[0]);
+        mag->y = (int16_t)(data[3] << 8 | data[2]);
+        mag->z = (int16_t)(data[5] << 8 | data[4]);
+
+        // 读取ST2寄存器
+        I2C_ReadReg(AK09918_ADDRESS, AK09918_ST2, &st2);
+
+        // 每次读取都打印一次数据，直到看到非零值
+        static uint32_t print_cnt = 0;
+        if (print_cnt++ % 10 == 0 || mag->x != 0 || mag->y != 0) {
+            printf("\r\nAK09918: ST1=0x%02X, ST2=0x%02X, X=%6d Y=%6d Z=%6d ",
+                   st1, st2, mag->x, mag->y, mag->z);
+        }
+
+        return 1;
+    }
+    return 0;
+}
+
+// ==================== I2C初始化 ====================
+void I2C_Init(void) {
+    __HAL_RCC_I2C1_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 100000;
+    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    HAL_I2C_Init(&hi2c1);
+}
+
+// ==================== I2C扫描函数 ====================
+void I2C_Scan(void) {
+    uint8_t found_devices = 0;
+    char buf[32];
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)"\r\nScanning I2C bus...\r\n", 25, 100);
+
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, (addr << 1), 3, 50) == HAL_OK) {
+            sprintf(buf, "Found device at 0x%02X\r\n", addr);
+            HAL_UART_Transmit(&huart2, (uint8_t*)buf, strlen(buf), 100);
+            found_devices++;
+        }
+    }
+
+    if (found_devices == 0) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"No I2C devices found!\r\n", 24, 100);
+    } else {
+        sprintf(buf, "Total %d devices found\r\n", found_devices);
+        HAL_UART_Transmit(&huart2, (uint8_t*)buf, strlen(buf), 100);
+    }
+}
+
+// ==================== IMU综合函数 ====================
+uint8_t IMU_Init(void) {
+    HAL_UART_Transmit(&huart2, (uint8_t*)"\r\nChecking ICM20600...\r\n", 25, 100);
+
+    if (!ICM20600_Check()) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"❌ ICM20600 not detected!\r\n", 28, 100);
+        return 0;
+    }
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)"Checking AK09918...\r\n", 22, 100);
+    if (!AK09918_Check()) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"❌ AK09918 not detected!\r\n", 27, 100);
+        return 0;
+    }
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)"Initializing ICM20600...\r\n", 26, 100);
+    if (!ICM20600_Init()) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)" FAILED\r\n", 10, 100);
+        return 0;
+    }
+    HAL_UART_Transmit(&huart2, (uint8_t*)" OK\r\n", 6, 100);
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)"Initializing AK09918...\r\n", 25, 100);
+    if (!AK09918_Init()) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)" FAILED\r\n", 10, 100);
+        return 0;
+    }
+    HAL_UART_Transmit(&huart2, (uint8_t*)" OK\r\n", 6, 100);
+
+    return 1;
+}
+
+uint8_t IMU_ReadAll(imu_9dof_data_t *data) {
+    uint8_t success = 1;
+
+    if (ICM20600_ReadAccel(&data->accel) != HAL_OK) success = 0;
+    if (ICM20600_ReadGyro(&data->gyro) != HAL_OK) success = 0;
+    if (ICM20600_ReadTemp(&data->temperature) != HAL_OK) success = 0;
+
+    // 强制读取磁力计，忽略返回值
+    AK09918_ReadMag(&data->mag);
+
+    return success;
+}
+
+void ConvertAndPrint(imu_9dof_data_t *data) {
+    float accel_scale = 16.0f / 32768.0f;
+    float gyro_scale = 2000.0f / 32768.0f;
+    float temp = data->temperature / 326.8f + 21.0f;
+    float mag_scale = 0.15f;
+
+    char buffer[256];
+    sprintf(buffer, "\r\nAccel: X%7.2fg Y%7.2fg Z%7.2fg | Gyro: X%7.2f Y%7.2f Z%7.2f | Mag: X%7.2fuT Y%7.2fuT Z%7.2fuT | Temp: %5.1fC ",
+            data->accel.x * accel_scale,
+            data->accel.y * accel_scale,
+            data->accel.z * accel_scale,
+            data->gyro.x * gyro_scale,
+            data->gyro.y * gyro_scale,
+            data->gyro.z * gyro_scale,
+            data->mag.x * mag_scale,
+            data->mag.y * mag_scale,
+            data->mag.z * mag_scale,
+            temp);
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
+}
+
+// ==================== 姿态计算函数（带磁偏角补偿）====================
+void CalculateAttitude(imu_9dof_data_t *data, attitude_t *att) {
+    // 1. 将原始数据转换为物理单位
+    float ax = data->accel.x * 16.0f / 32768.0f;  // 加速度 (g)
+    float ay = data->accel.y * 16.0f / 32768.0f;
+    float az = data->accel.z * 16.0f / 32768.0f;
+
+    // 磁力计数据 (uT)
+    float mx = data->mag.x * 0.15f;
+    float my = data->mag.y * 0.15f;
+    float mz = data->mag.z * 0.15f;
+
+    // 2. 计算Roll和Pitch（弧度）
+    // Roll: 绕X轴的旋转角
+    att->roll = atan2f(ay, az);
+
+    // Pitch: 绕Y轴的旋转角
+    float accel_norm = sqrtf(ay*ay + az*az);
+    att->pitch = atan2f(-ax, accel_norm);
+
+    // 3. 将磁力计数据转换到水平坐标系（倾角补偿）
+    float cos_roll = cosf(att->roll);
+    float sin_roll = sinf(att->roll);
+    float cos_pitch = cosf(att->pitch);
+    float sin_pitch = sinf(att->pitch);
+
+    // 计算水平分量
+    float Xh = mx * cos_pitch + my * sin_roll * sin_pitch + mz * cos_roll * sin_pitch;
+    float Yh = my * cos_roll - mz * sin_roll;
+
+    // 4. 计算航向角（弧度转角度）
+    float heading_rad = atan2f(Yh, Xh);
+    att->heading = heading_rad * 180.0f / 3.14159f;
+
+    // 5. 添加磁偏角补偿（英国地区约 -1° 到 -3°）
+    // 您可以根据实际位置调整这个值
+    att->heading += -2.0f;  // 负值表示磁北在西边
+
+    // 6. 确保角度在 0-360 度范围内
+    if (att->heading < 0) att->heading += 360.0f;
+    if (att->heading >= 360.0f) att->heading -= 360.0f;
+
+    // 7. 将Roll和Pitch转换为角度
+    att->roll *= 180.0f / 3.14159f;
+    att->pitch *= 180.0f / 3.14159f;
+}
+// ==================== 简化后的打印函数（只输出姿态角）====================
+void PrintAttitude(attitude_t *att, imu_9dof_data_t *data) {
+    char buffer[64];
+
+    // 只打印姿态角，不打印磁力计数据
+    sprintf(buffer, "\r\nRoll: %6.2f° Pitch: %6.2f° Heading: %6.2f° ",
+            att->roll, att->pitch, att->heading);
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
+}
+
+// ==================== 主函数 ====================
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+
+    // 串口初始化
+    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    HAL_UART_Init(&huart2);
+
+    printf("\r\n========================================\r\n");
+    printf("STM32F407 + ICM20600 + AK09918 Test\r\n");
+    printf("========================================\r\n\r\n");
+
+    printf("Initializing I2C...\r\n");
+    I2C_Init();
+
+    I2C_Scan();
+
+    imu_initialized = IMU_Init();
+
+    if (imu_initialized) {
+        printf("\r\n✅ IMU initialized successfully!\r\n");
+        printf("========================================\r\n\r\n");
+    } else {
+        printf("\r\n❌ IMU initialization failed!\r\n");
+    }
+
+    imu_9dof_data_t imu_data;
+    attitude_t attitude;
+    uint32_t count = 0;
+
+    while(1)
+    {
+        if (imu_initialized) {
+            // 强制读取所有数据，不检查返回值
+            ICM20600_ReadAccel(&imu_data.accel);
+            ICM20600_ReadGyro(&imu_data.gyro);
+            ICM20600_ReadTemp(&imu_data.temperature);
+            AK09918_ReadMag(&imu_data.mag);  // 不管返回值，强制读取
+
+            CalculateAttitude(&imu_data, &attitude);
+
+            // 每5次循环打印一次
+            if (count % 5 == 0) {
+                PrintAttitude(&attitude, &imu_data);
+            }
+
+            count++;
+
+            HAL_Delay(100);
+        } else {
+            printf(".");
+            fflush(stdout);
+            HAL_Delay(1000);
+        }
+    }
+}
+
+// ==================== 系统时钟配置 ====================
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 8;
+    RCC_OscInitStruct.PLL.PLLN = 336;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 7;
+    HAL_RCC_OscConfig(&RCC_OscInitStruct);
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
+}
+
+// SysTick_Handler 由 stm32f4xx_it.c 提供
