@@ -50,14 +50,14 @@ extern RTC_HandleTypeDef hrtc; // (Uncomment after generating RTC in CubeMX)
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-/* USER CODE END PM */
+  // Try address 0x28 first
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
-
+    // Set to CONFIG mode
 RTC_HandleTypeDef hrtc;
 
 SD_HandleTypeDef hsd;
@@ -69,7 +69,7 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-
+    // Check current mode
 volatile bool g_esp_line_received = false;
 char g_esp_process_buffer[RX_BUFFER_SIZE];
 GliderState g_glider_state; // Global glider state variable
@@ -77,7 +77,7 @@ GliderState g_glider_state; // Global glider state variable
 // --- Non-blocking Delay Variables ---
 uint32_t g_last_tx_time = 0;
 const uint32_t TX_INTERVAL_MS = 1000; // 1 second (Changed back from 1 minute)
-
+    // Check calibration status
 // --- IMU Variables ---
 uint8_t bno_data[6];
 uint8_t mpu_data[14];
@@ -101,7 +101,7 @@ volatile bool g_line_received = false;
 char g_process_buffer[RX_BUFFER_SIZE];
 
 // Uncomment the below variables after generating FATFS in CubeMX
-// FATFS fs;
+    // Check current mode
 // FIL file;
 // FRESULT fres;
 /* USER CODE END PV */
@@ -145,7 +145,7 @@ int main(void)
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
-  /* USER CODE BEGIN Init */
+      // Gyro 2000 dps
 
   /* USER CODE END Init */
 
@@ -155,7 +155,7 @@ int main(void)
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
-
+      // Enable I2C bypass for Magnetometer
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
