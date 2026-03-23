@@ -2,10 +2,12 @@
 #include "main.h" // send_log
 #include <stdio.h>
 
-static bool read_bno_id(I2C_HandleTypeDef* hi2c, uint8_t addr7, uint8_t* out_id)
+static bool read_imu_id(I2C_HandleTypeDef* hi2c, uint8_t addr7, uint8_t reg, uint8_t expected, uint8_t* out_id)
 {
-    // BNO055 chip ID register = 0x00, expected 0xA0
-    return (HAL_I2C_Mem_Read(hi2c, (addr7 << 1), 0x00, 1, out_id, 1, 100) == HAL_OK);
+    if (HAL_I2C_Mem_Read(hi2c, (addr7 << 1), reg, 1, out_id, 1, 100) == HAL_OK) {
+        return (*out_id == expected);
+    }
+    return false;
 }
 
 static uint16_t adc_read_once(ADC_HandleTypeDef* hadc)
@@ -43,18 +45,29 @@ void SystemCheck_Update(SystemCheckCtx* c, uint32_t now_ms,
         break;
 
     case SYSCHK_I2C_SCAN: {
-        // Quick check: do we see BNO055 at 0x28 or 0x29?
         uint8_t id = 0;
-        if (read_bno_id(hi2c, 0x28, &id) && id == 0xA0) {
+        // Check BNO055
+        if (read_imu_id(hi2c, 0x28, 0x00, 0xA0, &id)) {
             c->imu_addr = 0x28;
-            send_log("[SYS] IMU @0x28\r\n");
+            send_log("[SYS] IMU: BNO055 @0x28\r\n");
             c->state = SYSCHK_ADC_READ;
-        } else if (read_bno_id(hi2c, 0x29, &id) && id == 0xA0) {
+        } else if (read_imu_id(hi2c, 0x29, 0x00, 0xA0, &id)) {
             c->imu_addr = 0x29;
-            send_log("[SYS] IMU @0x29\r\n");
+            send_log("[SYS] IMU: BNO055 @0x29\r\n");
             c->state = SYSCHK_ADC_READ;
-        } else {
-            send_log("[SYS] IMU not found\r\n");
+        } 
+        // Check MPU9250
+        else if (read_imu_id(hi2c, 0x69, 0x75, 0x71, &id)) {
+            c->imu_addr = 0x69;
+            send_log("[SYS] IMU: MPU9250 @0x69\r\n");
+            c->state = SYSCHK_ADC_READ;
+        } else if (read_imu_id(hi2c, 0x68, 0x75, 0x71, &id)) {
+            c->imu_addr = 0x68;
+            send_log("[SYS] IMU: MPU9250 @0x68\r\n");
+            c->state = SYSCHK_ADC_READ;
+        }
+        else {
+            send_log("[SYS] IMU not found (BNO055/MPU9250)\r\n");
             c->state = SYSCHK_FAIL;
         }
         break;

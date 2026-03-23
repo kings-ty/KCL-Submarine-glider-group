@@ -1,0 +1,28 @@
+# STM32CubeIDE / Eclipse
+# Debug/
+# Release/
+# .settings/
+# .project
+# .cproject
+# *.bak
+# *.o
+# *.d
+# *.su
+# *.elf
+# *.bin
+# *.hex
+# *.map
+# *.lst
+# *.zip
+# *.pdf
+# *.png
+# *.webm
+# *.skill
+# .metadata/
+# *.txt
+test_2/
+gemini-skills/
+
+Debug/
+simulation/
+Debug/

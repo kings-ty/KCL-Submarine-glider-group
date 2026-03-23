@@ -18,16 +18,22 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "fatfs.h"
 #include "usb_device.h"
-#include "app/app.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <math.h>
 #include "usbd_cdc_if.h"
 #include "esp32_comm.h"
+#include "app/app.h"
+#include "fatfs.h" // For SD Logging (Uncomment after generating FATFS in CubeMX)
+
+extern RTC_HandleTypeDef hrtc; // (Uncomment after generating RTC in CubeMX)
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,7 +44,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define UART_HANDLE huart2
-#define RX_BUFFER_SIZE 64
+#define RX_BUFFER_SIZE 128
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,33 +54,73 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
 
 I2C_HandleTypeDef hi2c1;
+I2C_HandleTypeDef hi2c2;
+
+RTC_HandleTypeDef hrtc;
+
+SD_HandleTypeDef hsd;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
+
+volatile bool g_esp_line_received = false;
+char g_esp_process_buffer[RX_BUFFER_SIZE];
+GliderState g_glider_state; // Global glider state variable
+
+// --- Non-blocking Delay Variables ---
+uint32_t g_last_tx_time = 0;
+const uint32_t TX_INTERVAL_MS = 1000; // 1 second (Changed back from 1 minute)
+
+// --- IMU Variables ---
+uint8_t bno_data[6];
+uint8_t mpu_data[14];
+int16_t raw_pitch, raw_roll, raw_yaw;
+float pitch, roll, yaw;
+uint8_t bno_i2c_addr = 0x28;  // Default BNO055 address
+uint8_t mpu_i2c_addr = 0x69;  // MPU9250 address confirmed by user
+uint8_t mag_i2c_addr = 0x0C;  // MPU9250 Magnetometer address
+bool is_mpu9250 = false;
+
 // UART RX (used if UART interrupt re-enabled)
 uint8_t g_rx_data;
 uint8_t g_rx_buffer[RX_BUFFER_SIZE];
 uint16_t g_rx_index = 0;
+uint8_t esp_rx_data;
+uint8_t esp_rx_buffer[RX_BUFFER_SIZE];
+uint16_t esp_rx_index = 0;
+uint32_t g_esp_total_bytes = 0; // ESP32 total received bytes check
+
+volatile bool g_line_received = false;
+char g_process_buffer[RX_BUFFER_SIZE];
+
+// Uncomment the below variables after generating FATFS in CubeMX
+// FATFS fs;
+// FIL file;
+// FRESULT fres;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_ADC2_Init(void);
+static void MX_I2C2_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_RTC_Init(void);
+static void MX_SDIO_SD_Init(void);
 /* USER CODE BEGIN PFP */
-
+void ESP32_Process_Data(const char* data);
+void send_log(const char* message);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -90,7 +136,8 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  uint32_t adc_raw = 0;
+  float oxygen_voltage = 0.0f;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -116,11 +163,175 @@ int main(void)
   MX_TIM2_Init();
   MX_I2C1_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
+  MX_I2C2_Init();
+  MX_TIM1_Init();
+  MX_USART3_UART_Init();
+  MX_RTC_Init();
+  MX_SDIO_SD_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   MX_TIM1_Init();
+  MX_USART3_UART_Init();
+  MX_RTC_Init();
+  MX_SDIO_SD_Init();
+  MX_FATFS_Init();
+  /* USER CODE BEGIN 2 */
+  // Initialize glider state
+  memset(&g_glider_state, 0, sizeof(GliderState));
+  g_glider_state.status = 0; // 0: Normal
+  g_glider_state.is_motor_on = false;
   App_Init();
-  ESP32_Comm_Init(&huart2);
+  // Initialize random seed
+  srand(HAL_GetTick());
+
+  // Start UART reception in interrupt mode
+  HAL_UART_Receive_IT(&huart2, &g_rx_data, 1);
+
+  HAL_UART_Receive_IT(&huart3, &esp_rx_data, 1);
+  send_log("--- SYSTEM READY (115200 BAUD) ---\r\n");
+  // Scan I2C bus for devices
+  send_log("[I2C] Scanning bus...\r\n");
+  HAL_Delay(100);
+  int found = 0;
+  for(uint8_t addr = 1; addr < 128; addr++)
+  {
+      if(HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 1, 10) == HAL_OK)
+      {
+          char msg[50];
+          snprintf(msg, sizeof(msg), "[I2C] Device found at 0x%02X\r\n", addr);
+          send_log(msg);
+          found++;
+      }
+  }
+  if(found == 0)
+  {
+      send_log("[I2C] No devices found - check wiring!\r\n");
+  }
+
+  // Check detected addresses (0x0C, 0x69 might be MPU9250)
+  if (found > 0) {
+      send_log("[INFO] 0x69/0x0C detected? (Possible MPU9250)\r\n");
+  }
+
+  // Initialize BNO055 IMU
+  HAL_Delay(100);
+  uint8_t bno_id = 0;
+  
+  // Try address 0x28 first
+  if(HAL_I2C_Mem_Read(&hi2c1, (0x28 << 1), 0x00, 1, &bno_id, 1, 100) == HAL_OK && bno_id == 0xA0)
+  {
+      bno_i2c_addr = 0x28;
+      send_log("[IMU] BNO055 detected at 0x28\r\n");
+      
+      // Set to CONFIG mode
+      uint8_t config_mode = 0x00;
+      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &config_mode, 1, 100);
+      HAL_Delay(25);
+      
+      // Set to NDOF mode (9-axis fusion)
+      uint8_t ndof_mode = 0x0C;
+      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &ndof_mode, 1, 100);
+      HAL_Delay(100);  // Increased delay for sensor stabilization
+      
+      // Check current mode
+      uint8_t current_mode = 0;
+      HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &current_mode, 1, 100);
+      char mode_msg[50];
+      snprintf(mode_msg, sizeof(mode_msg), "[IMU] Mode: 0x%02X\r\n", current_mode);
+      send_log(mode_msg);
+      
+      // Check calibration status
+      uint8_t calib = 0;
+      HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x35, 1, &calib, 1, 100);
+      char calib_msg[50];
+      snprintf(calib_msg, sizeof(calib_msg), "[IMU] Calib: 0x%02X\r\n", calib);
+      send_log(calib_msg);
+      
+      send_log("[IMU] Initialized OK\r\n");
+  }
+  // Try address 0x29
+  else if(HAL_I2C_Mem_Read(&hi2c1, (0x29 << 1), 0x00, 1, &bno_id, 1, 100) == HAL_OK && bno_id == 0xA0)
+  {
+      bno_i2c_addr = 0x29;
+      send_log("[IMU] BNO055 detected at 0x29\r\n");
+      
+      uint8_t config_mode = 0x00;
+      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &config_mode, 1, 100);
+      HAL_Delay(25);
+      
+      uint8_t ndof_mode = 0x0C;
+      HAL_I2C_Mem_Write(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &ndof_mode, 1, 100);
+      HAL_Delay(100);  // Increased delay
+      
+      // Check current mode
+      uint8_t current_mode = 0;
+      HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x3D, 1, &current_mode, 1, 100);
+      char mode_msg[50];
+      snprintf(mode_msg, sizeof(mode_msg), "[IMU] Mode: 0x%02X\r\n", current_mode);
+      send_log(mode_msg);
+      
+      send_log("[IMU] Initialized OK at 0x29\r\n");
+  }
+  else
+  {
+      send_log("[IMU] BNO055 Not found (0x28/0x29) - Checking for MPU9250...\r\n");
+      
+      uint8_t mpu_id = 0;
+      // Try reading WHO_AM_I (0x75) from 0x69
+      HAL_StatusTypeDef mpu_status = HAL_I2C_Mem_Read(&hi2c1, (mpu_i2c_addr << 1), 0x75, 1, &mpu_id, 1, 100);
+      
+      if(mpu_status == HAL_OK && (mpu_id == 0x71 || mpu_id == 0x70 || mpu_id == 0x11))
+      {
+          is_mpu9250 = true;
+          char m_msg[50];
+          snprintf(m_msg, sizeof(m_msg), "[IMU] MPU9250 detected! ID: 0x%02X\r\n", mpu_id);
+          send_log(m_msg);
+          
+          uint8_t data = 0;
+          // Reset
+          data = 0x80;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x6B, 1, &data, 1, 100);
+          HAL_Delay(100);
+          
+          // Wake up, clock source auto
+          data = 0x01;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x6B, 1, &data, 1, 100);
+          HAL_Delay(10);
+          
+          // Config DLPF
+          data = 0x03;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x1A, 1, &data, 1, 100);
+          
+          // Gyro 2000 dps
+          data = 0x18;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x1B, 1, &data, 1, 100);
+          
+          // Accel 4g
+          data = 0x08;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x1C, 1, &data, 1, 100);
+          
+          // Enable I2C bypass for Magnetometer
+          data = 0x02;
+          HAL_I2C_Mem_Write(&hi2c1, (mpu_i2c_addr << 1), 0x37, 1, &data, 1, 100);
+          HAL_Delay(10);
+          
+          // Init Magnetometer (AK8963)
+          data = 0x16; // 16-bit output, 100Hz continuous measurement
+          if(HAL_I2C_Mem_Write(&hi2c1, (mag_i2c_addr << 1), 0x0A, 1, &data, 1, 100) == HAL_OK)
+          {
+              send_log("[IMU] AK8963 Magnetometer initialized\r\n");
+          }
+          
+          send_log("[IMU] MPU9250 Initialized OK\r\n");
+      }
+      else
+      {
+          char err_msg[100];
+          snprintf(err_msg, sizeof(err_msg), "[IMU] MPU9250 Read Error! Status: %d, ID: 0x%02X\r\n", mpu_status, mpu_id);
+          send_log(err_msg);
+          send_log("[IMU] No IMU found! (BNO055/MPU9250)\r\n");
+      }
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -131,7 +342,157 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Tick();
-	ESP32_Comm_Process();
+
+    // --- TASK: Handle incoming serial data from PC or ESP32 ---
+    if (g_line_received) {
+            process_serial_command((uint8_t*)g_process_buffer, strlen(g_process_buffer));
+            g_line_received = false;
+        }
+
+        // --- 🌟 Log all data coming from ESP32 🌟 ---
+        if (g_esp_line_received) {
+            // [1] Print whatever comes in to PC(UART2) unconditionally!
+            char raw_log[RX_BUFFER_SIZE + 32];
+            snprintf(raw_log, sizeof(raw_log), ">>> [FROM ESP32]: %s\r\n", g_esp_process_buffer);
+            send_log(raw_log);
+
+            // [2] Perform existing data analysis (SDLOG check, etc.)
+            ESP32_Process_Data(g_esp_process_buffer);
+
+            g_esp_line_received = false; // Processing complete
+        }
+
+    // --- 1. Non-blocking sensor data transmission every second ---
+    uint32_t current_time = HAL_GetTick();
+    if (current_time - g_last_tx_time >= TX_INTERVAL_MS)
+    {
+        g_last_tx_time = current_time;
+
+        // --- TASK 1: Periodic Depth Reading & Transmission ---
+        float ms5837_depth = 1.5f;
+        float ms5837_temp = 20.3f;
+        
+        int ms_d_int = (int)ms5837_depth;
+        int ms_d_dec = (int)((ms5837_depth - ms_d_int) * 100);
+        int ms_t_int = (int)ms5837_temp;
+        int ms_t_dec = (int)((ms5837_temp - ms_t_int) * 100);
+
+        char depth_msg[50];
+        snprintf(depth_msg, sizeof(depth_msg), "D:%d.%02d,T:%d.%02d\n", ms_d_int, ms_d_dec, ms_t_int, ms_t_dec);
+        HAL_UART_Transmit(&huart2, (uint8_t*)depth_msg, strlen(depth_msg), 100);
+
+        // 1. Read IMU data
+        if (!is_mpu9250)
+        {
+            // BNO055 Reading
+            HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c1, (bno_i2c_addr << 1), 0x1A, 1, bno_data, 6, 100);
+            if(status == HAL_OK)
+            {
+                raw_yaw   = (int16_t)((bno_data[1] << 8) | bno_data[0]);
+                raw_roll  = (int16_t)((bno_data[3] << 8) | bno_data[2]);
+                raw_pitch = (int16_t)((bno_data[5] << 8) | bno_data[4]);
+                
+                yaw   = (float)raw_yaw / 16.0f;
+                roll  = (float)raw_roll / 16.0f;
+                pitch = (float)raw_pitch / 16.0f;
+            }
+        }
+        else
+        {
+            // MPU9250 Reading (Accel + Gyro)
+            if(HAL_I2C_Mem_Read(&hi2c1, (mpu_i2c_addr << 1), 0x3B, 1, mpu_data, 14, 100) == HAL_OK)
+            {
+                int16_t ax = (int16_t)((mpu_data[0] << 8) | mpu_data[1]);
+                int16_t ay = (int16_t)((mpu_data[2] << 8) | mpu_data[3]);
+                int16_t az = (int16_t)((mpu_data[4] << 8) | mpu_data[5]);
+                
+                pitch = atan2f((float)ay, sqrtf((float)ax*ax + (float)az*az)) * 57.29578f;
+                roll  = atan2f(-(float)ax, (float)az) * 57.29578f;
+                
+                uint8_t mag_status = 0;
+                HAL_I2C_Mem_Read(&hi2c1, (mag_i2c_addr << 1), 0x02, 1, &mag_status, 1, 100);
+                if(mag_status & 0x01) {
+                    uint8_t mag_data[7];
+                    if(HAL_I2C_Mem_Read(&hi2c1, (mag_i2c_addr << 1), 0x03, 1, mag_data, 7, 100) == HAL_OK) {
+                        int16_t mx = (int16_t)((mag_data[1] << 8) | mag_data[0]);
+                        int16_t my = (int16_t)((mag_data[3] << 8) | mag_data[2]);
+                        yaw = atan2f((float)my, (float)mx) * 57.29578f;
+                    }
+                }
+                
+                int p_i = (int)pitch; int p_d = (int)((pitch - p_i) * 10); if(p_d < 0) p_d = -p_d;
+                int r_i = (int)roll;  int r_d = (int)((roll - r_i) * 10);  if(r_d < 0) r_d = -r_d;
+                int y_i = (int)yaw;   int y_d = (int)((yaw - y_i) * 10);   if(y_d < 0) y_d = -y_d;
+
+                char dbg[100];
+                snprintf(dbg, sizeof(dbg), "[MPU] Acc: %d,%d,%d | P:%d.%d R:%d.%d Y:%d.%d\r\n", ax, ay, az, p_i, p_d, r_i, r_d, y_i, y_d);
+                send_log(dbg);
+            }
+        }
+
+        // ADC Oxygen Sensor Reading
+        // 1. Start ADC
+        HAL_ADC_Start(&hadc1);
+
+        // 2. Wait for conversion complete (timeout 10ms)
+        if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK)
+        {
+            // 3. Read digital value (0 ~ 4095)
+            adc_raw = HAL_ADC_GetValue(&hadc1);
+
+            // 4. Convert to voltage value (3.3V reference)
+            // Formula: V = (ADC_Value * 3.3) / 4095
+            oxygen_voltage = (float)adc_raw * (3.3f / 4095.0f);
+        }
+        // 5. Stop ADC
+        HAL_ADC_Stop(&hadc1);
+
+        // 2. Get simulated sensor data
+        get_simulated_sensors(&g_glider_state.sensors);
+        g_glider_state.status = rand() % 3;
+        g_glider_state.tinyml_result = rand() % 2;
+
+        // 3. Format and send all data (Manually format floats for compatibility)
+        int v_int = (int)g_glider_state.sensors.voltage;
+        int v_dec = (int)((g_glider_state.sensors.voltage - v_int) * 100);
+        if (v_dec < 0) v_dec = -v_dec;
+
+        int d_int = (int)g_glider_state.sensors.depth;
+        int d_dec = (int)((g_glider_state.sensors.depth - d_int) * 100);
+        if (d_dec < 0) d_dec = -d_dec;
+
+        int p_int = (int)pitch;
+        int p_dec = (int)((pitch - p_int) * 100);
+        if (p_dec < 0) p_dec = -p_dec;
+
+        int r_int = (int)roll;
+        int r_dec = (int)((roll - r_int) * 100);
+        if (r_dec < 0) r_dec = -r_dec;
+
+        int y_int = (int)yaw;
+        int y_dec = (int)((yaw - y_int) * 100);
+        if (y_dec < 0) y_dec = -y_dec;
+
+        int o2_v_int = (int)oxygen_voltage;
+        int o2_v_dec = (int)((oxygen_voltage - o2_v_int) * 1000); // 3 decimal places
+        if (o2_v_dec < 0) o2_v_dec = -o2_v_dec;
+
+        char tx_buffer[256];
+        snprintf(tx_buffer, sizeof(tx_buffer),
+                 "[TELEMETRY] Y:%d.%02d R:%d.%02d P:%d.%02d | D:%d.%02d V:%d.%02d | O2:%d.%03dV St:%d ML:%d ADC:%lu | ESP_RX:%lu\r\n",
+                 y_int, y_dec, r_int, r_dec, p_int, p_dec,
+                 d_int, d_dec, v_int, v_dec,
+                 o2_v_int, o2_v_dec,
+                 g_glider_state.status,
+                 g_glider_state.tinyml_result,
+                 adc_raw,
+                 g_esp_total_bytes);
+        send_log(tx_buffer);
+
+        // HAL_Delay(1000);
+    }
+
+    // --- 2. Other non-blocking tasks can be added here ---
   }
   /* USER CODE END 3 */
 }
@@ -153,11 +514,12 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 25;
+  RCC_OscInitStruct.PLL.PLLM = 8;
   RCC_OscInitStruct.PLL.PLLN = 336;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 7;
@@ -222,7 +584,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -236,46 +598,6 @@ static void MX_ADC1_Init(void)
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct_adc);
   /* USER CODE END ADC1_Init 2 */
 
-}
-
-/**
-  * @brief ADC2 Initialization - PA1 = ADC2_IN1 for LD20 buoyancy potentiometer
-  *        Wire: LD20 Yellow -> 3.3V, LD20 White -> GND, LD20 Blue -> PA1
-  *        Output: 0-3.3V maps to 0-100mm stroke position
-  * @retval None
-  */
-static void MX_ADC2_Init(void)
-{
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  __HAL_RCC_ADC2_CLK_ENABLE();
-
-  hadc2.Instance                   = ADC2;
-  hadc2.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc2.Init.Resolution            = ADC_RESOLUTION_12B;
-  hadc2.Init.ScanConvMode          = DISABLE;
-  hadc2.Init.ContinuousConvMode    = DISABLE;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
-  hadc2.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.NbrOfConversion       = 1;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
-  hadc2.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK) { Error_Handler(); }
-
-  // 56-cycle sample time: needed because the LD20 pot has 10K source impedance
-  sConfig.Channel      = ADC_CHANNEL_1;
-  sConfig.Rank         = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK) { Error_Handler(); }
-
-  // PA1 must be in ANALOG mode for ADC to work correctly
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  GPIO_InitStruct.Pin  = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 /**
@@ -309,6 +631,200 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief I2C2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C2_Init(void)
+{
+
+  /* USER CODE BEGIN I2C2_Init 0 */
+
+  /* USER CODE END I2C2_Init 0 */
+
+  /* USER CODE BEGIN I2C2_Init 1 */
+
+  /* USER CODE END I2C2_Init 1 */
+  hi2c2.Instance = I2C2;
+  hi2c2.Init.ClockSpeed = 100000;
+  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c2.Init.OwnAddress2 = 0;
+  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C2_Init 2 */
+
+  /* USER CODE END I2C2_Init 2 */
+
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN Check_RTC_BKUP */
+
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date
+  */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
+  * @brief SDIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SDIO_SD_Init(void)
+{
+
+  /* USER CODE BEGIN SDIO_Init 0 */
+
+  /* USER CODE END SDIO_Init 0 */
+
+  /* USER CODE BEGIN SDIO_Init 1 */
+
+  /* USER CODE END SDIO_Init 1 */
+  hsd.Instance = SDIO;
+  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
+  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
+  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
+  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
+  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
+  hsd.Init.ClockDiv = 0;
+  /* USER CODE BEGIN SDIO_Init 2 */
+
+  /* USER CODE END SDIO_Init 2 */
+
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 168-1;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 1000;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
 
 }
 
@@ -358,57 +874,6 @@ static void MX_TIM2_Init(void)
 }
 
 /**
-  * @brief TIM1 PWM Initialization (PA8=CH1 buoyancy, PA9=CH2 mass)
-  *        Prescaler=167 -> timer clock=1MHz, ARR=999 -> PWM=1kHz
-  * @retval None
-  */
-static void MX_TIM1_Init(void)
-{
-  TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTime = {0};
-
-  __HAL_RCC_TIM1_CLK_ENABLE();
-
-  htim1.Instance               = TIM1;
-  htim1.Init.Prescaler         = 168 - 1;   // 168 MHz -> 1 MHz timer clock
-  htim1.Init.CounterMode       = TIM_COUNTERMODE_UP;
-  htim1.Init.Period            = 999;        // 1 MHz / 1000 = 1 kHz PWM
-  htim1.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
-  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) { Error_Handler(); }
-
-  // TIM1 is an advanced timer: BDTR must be configured to enable output
-  sBreakDeadTime.OffStateRunMode  = TIM_OSSR_DISABLE;
-  sBreakDeadTime.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTime.LockLevel        = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTime.DeadTime         = 0;
-  sBreakDeadTime.BreakState       = TIM_BREAK_DISABLE;
-  sBreakDeadTime.BreakPolarity    = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTime.AutomaticOutput  = TIM_AUTOMATICOUTPUT_ENABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTime) != HAL_OK) { Error_Handler(); }
-
-  sConfigOC.OCMode      = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse       = 0;
-  sConfigOC.OCPolarity  = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode  = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState  = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) { Error_Handler(); }
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK) { Error_Handler(); }
-
-  // PA8 = TIM1_CH1 (AF1), PA9 = TIM1_CH2 (AF1)
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  GPIO_InitStruct.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
-  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull      = GPIO_NOPULL;
-  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-}
-
-/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -424,7 +889,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
+  huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -438,6 +903,39 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
 
 }
 
@@ -456,8 +954,36 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_9|GPIO_PIN_11, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PA1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB0 PB1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PE9 PE11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   // PA0 = ADC1_IN0 (O2 sensor), PA1 = ADC2_IN1 (LD20 buoyancy pot)
@@ -487,6 +1013,16 @@ static void MX_GPIO_Init(void)
   // Start with both drivers stopped (INA=INB=0)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11, GPIO_PIN_RESET);
 
+  // Stepper motor direction pins (L298N)
+  // PB12=IN1, PB13=IN2, PB14=IN3, PB15=IN4
+  GPIO_InitStruct.Pin   = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  // De-energise all coils initially
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -496,8 +1032,32 @@ static void MX_GPIO_Init(void)
   * @param  message: The string to send.
   * @retval None
   */
+void ESP32_Process_Data(const char* data) {
+    // 1. Print entire data log from ESP32 (Finally showing it!)
+    char log_msg[RX_BUFFER_SIZE + 20];
+    snprintf(log_msg, sizeof(log_msg), "[ESP32_RAW] %s\r\n", data);
+    send_log(log_msg);
+
+    // 2. Find position of "D:" string (Depth check and transmission control)
+    char *d_ptr = strstr(data, "D:");
+    if (d_ptr != NULL) {
+        float depth = atof(d_ptr + 2);
+        if (depth >= 1.0f) {
+            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_OK\n", 8, 100);
+        } else {
+            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_NO\n", 8, 100);
+        }
+    }
+
+    // 3. If "PH:" is in data, extract pH value (Optional)
+    char *ph_ptr = strstr(data, "PH:");
+    if (ph_ptr != NULL) {
+        // g_glider_state.sensors.ph = atof(ph_ptr + 3); // Use when PH variable is added
+    }
+}
+
 void send_log(const char* message) {
-    // HAL_UART_Transmit(&UART_HANDLE, (uint8_t*)message, strlen(message), 100);
+    HAL_UART_Transmit(&UART_HANDLE, (uint8_t*)message, strlen(message), 100);
 	CDC_Transmit_FS((uint8_t*)message, strlen(message));
 }
 
@@ -576,38 +1136,68 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == UART_HANDLE.Instance)
+    // =======================================================
+    // 1. PC monitoring and command reception (huart2)
+    // =======================================================
+    if (huart->Instance == huart2.Instance)
     {
-        // On newline character, process the command
         if (g_rx_data == '\n' || g_rx_data == '\r')
         {
             if (g_rx_index > 0)
             {
-                g_rx_buffer[g_rx_index] = '\0'; // 문자열 마무리 (이 줄 꼭 추가!)
-
-                // 🌟 Distribution 🌟
-                if (strncmp((char*)g_rx_buffer, "CMD:", 4) == 0) {
-                    // "CMD:" Monitor for PC
-                    process_serial_command(g_rx_buffer, g_rx_index); 
-                } 
-                else if (strncmp((char*)g_rx_buffer, "D:", 2) == 0) {
-                    // "D:" Using ESP32
-                    ESP32_Process_Data((char*)g_rx_buffer); 
-                }
-
+                process_serial_command(g_rx_buffer, g_rx_index);
                 g_rx_index = 0;
                 memset(g_rx_buffer, 0, RX_BUFFER_SIZE);
             }
         }
-        else // Otherwise, append to buffer
+        else
         {
-            if (g_rx_index < RX_BUFFER_SIZE - 1)
+            if (g_rx_index < RX_BUFFER_SIZE - 1) g_rx_buffer[g_rx_index++] = g_rx_data;
+        }
+        HAL_UART_Receive_IT(&huart2, &g_rx_data, 1);
+    }
+
+    // =======================================================
+    // 2. ESP32 sensor data reception (huart3) - 🌟 Newly added 🌟
+    // =======================================================
+    else if (huart->Instance == huart3.Instance)
+    {
+        if (esp_rx_data == '\n' || esp_rx_data == '\r')
+        {
+            if (esp_rx_index > 0)
             {
-                g_rx_buffer[g_rx_index++] = g_rx_data;
+                esp_rx_buffer[esp_rx_index] = '\0';
+
+                // When data arrives from ESP32, put into g_esp_process_buffer and flag ON!
+                if (!g_esp_line_received)
+                {
+                    strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
+                    g_esp_line_received = true; // Flag ON!
+                }
+                esp_rx_index = 0;
+                memset(esp_rx_buffer, 0, RX_BUFFER_SIZE);
             }
         }
-        // Re-arm UART reception interrupt
-        HAL_UART_Receive_IT(&UART_HANDLE, &g_rx_data, 1);
+        else
+        {
+            g_esp_total_bytes++; // Increment byte count
+            if (esp_rx_index < RX_BUFFER_SIZE - 1) 
+            {
+                esp_rx_buffer[esp_rx_index++] = esp_rx_data;
+            }
+            else
+            {
+                // Force processing if buffer is full (In case a line is too long)
+                esp_rx_buffer[RX_BUFFER_SIZE - 1] = '\0';
+                if (!g_esp_line_received)
+                {
+                    strncpy(g_esp_process_buffer, (char*)esp_rx_buffer, RX_BUFFER_SIZE);
+                    g_esp_line_received = true;
+                }
+                esp_rx_index = 0;
+            }
+        }
+        HAL_UART_Receive_IT(&huart3, &esp_rx_data, 1);
     }
 }
 /* USER CODE END 4 */
@@ -621,7 +1211,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
+  // __disable_irq();  // Disabled: kills USB IRQ, preventing CDC serial from working
   while (1)
   {
   }

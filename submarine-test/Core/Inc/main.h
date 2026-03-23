@@ -42,6 +42,7 @@ typedef struct {
     float voltage;
     float depth;
     float o2;
+    float ph;
 } GliderSensors;
 
 // Structure to manage overall glider state
@@ -63,6 +64,8 @@ typedef struct {
 /* USER CODE BEGIN EM */
 
 /* USER CODE END EM */
+
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
