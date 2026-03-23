@@ -1,5 +1,6 @@
 #include "app/app.h"
 #include "app/demo.h"
+#include "drivers/l298n_stepper.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -23,9 +24,12 @@ static GliderState s_state;
 static LinearActuator s_buoy;
 static LinearActuator s_mass;
 
+// Stepper (mass rotation, L298N on PB12-PB15)
+static L298nStepper s_stepper;
+
 // Subsystems
 static SystemCheckCtx s_sys;
-static MissionCtx s_mission;
+static MotionCtx s_motion;
 static DemoCtx s_demo;
 
 // Depth Sensor
@@ -109,11 +113,18 @@ void App_Init(void)
     s_buoy.motor.pwm_max     = 1000;
 
     s_buoy.pwm_run = 600;
-    s_buoy.safety_timeout_ms = 12000;
+    s_buoy.safety_timeout_ms = 15000;
     // LD20 has a potentiometer: Blue wire -> PA1 (ADC2_IN1)
     // Yellow -> 3.3V, White -> GND (not STM32 pins, use power header)
+    // In DEMO_MODE run purely timed (no position feedback fighting the demo steps).
+    // Set has_pos=1 and hadc in normal mission mode when target_adc is properly set.
+#if DEMO_MODE
     s_buoy.has_pos = 0;
-    s_buoy.hadc = NULL;
+    s_buoy.hadc    = NULL;
+#else
+    s_buoy.has_pos = 1;
+    s_buoy.hadc    = &hadc2;
+#endif
     Act_Init(&s_buoy, now);
 
     // ----------------------------
@@ -140,8 +151,17 @@ void App_Init(void)
     s_mass.hadc = NULL;
     Act_Init(&s_mass, now);
 
+    // Stepper motor (L298N, mass rotation)
+    // IN1=PB12, IN2=PB13, IN3=PB14, IN4=PB15
+    s_stepper.in1_port = GPIOB; s_stepper.in1_pin = GPIO_PIN_12;
+    s_stepper.in2_port = GPIOB; s_stepper.in2_pin = GPIO_PIN_13;
+    s_stepper.in3_port = GPIOB; s_stepper.in3_pin = GPIO_PIN_14;
+    s_stepper.in4_port = GPIOB; s_stepper.in4_pin = GPIO_PIN_15;
+    Stepper_Init(&s_stepper);
+
     // System check + mission/demo
     SystemCheck_Init(&s_sys);
+    Motion_Init(&s_motion);
     Mission_Init(&s_mission);
     // Initialize MS5837 Depth Sensor on hi2c2
     s_depth_sensor_ok = MS5837_Init(&s_depth_sensor, &hi2c2);
@@ -171,14 +191,32 @@ void App_Tick(void)
         Act_Update(&s_mass, now);
 
 #if DEMO_MODE
-        Demo_Update(&s_demo, now, &s_buoy, &s_mass);
+        Demo_Update(&s_demo, now, &s_buoy, &s_mass, &s_stepper);
 #else
         /* --- 3-Second Test Logic (Ignores System Check & Mission) --- */
         /*
         if (!s_sys.done) {
             SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);
         } else {
-            Mission_Update(&s_mission, now, &s_state, &s_buoy);
+            Motion_Update(&s_motion, now, &s_state, &s_buoy, &s_mass, &s_stepper);
+        }
+        */
+
+        static uint32_t s_last_test = 0;
+        static bool is_extending = false;
+
+        if ((now - s_last_test) >= 3000) { // Toggle every 3 seconds
+            s_last_test = now;
+            
+            if (is_extending) {
+                Act_Retract(&s_buoy, now);
+                send_log("[TEST] Current Action: RETRACTING (3 sec)\r\n");
+                is_extending = false;
+            } else {
+                Act_Extend(&s_buoy, now);
+                send_log("[TEST] Current Action: EXTENDING (3 sec)\r\n");
+                is_extending = true;
+            }
         }
         */
 

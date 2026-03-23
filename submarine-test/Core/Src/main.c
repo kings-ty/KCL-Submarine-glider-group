@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include "usbd_cdc_if.h"
+#include "esp32_comm.h"
 #include "app/app.h"
 #include "fatfs.h" // For SD Logging (Uncomment after generating FATFS in CubeMX)
 
@@ -163,6 +164,12 @@ int main(void)
   MX_I2C1_Init();
   MX_ADC1_Init();
   MX_I2C2_Init();
+  MX_TIM1_Init();
+  MX_USART3_UART_Init();
+  MX_RTC_Init();
+  MX_SDIO_SD_Init();
+  MX_FATFS_Init();
+  /* USER CODE BEGIN 2 */
   MX_TIM1_Init();
   MX_USART3_UART_Init();
   MX_RTC_Init();
@@ -1006,6 +1013,16 @@ static void MX_GPIO_Init(void)
   // Start with both drivers stopped (INA=INB=0)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11, GPIO_PIN_RESET);
 
+  // Stepper motor direction pins (L298N)
+  // PB12=IN1, PB13=IN2, PB14=IN3, PB15=IN4
+  GPIO_InitStruct.Pin   = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  // De-energise all coils initially
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -1114,6 +1131,9 @@ void process_serial_command(uint8_t* buffer, uint16_t len)
   * @param  huart: UART handle.
   * @retval None
   */
+/* USER CODE BEGIN 4 */
+// ... (existed process_serial_command keep) ...
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     // =======================================================
@@ -1125,12 +1145,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         {
             if (g_rx_index > 0)
             {
-                g_rx_buffer[g_rx_index] = '\0';
-                if (!g_line_received)
-                {
-                    strncpy(g_process_buffer, (char*)g_rx_buffer, RX_BUFFER_SIZE);
-                    g_line_received = true;
-                }
+                process_serial_command(g_rx_buffer, g_rx_index);
                 g_rx_index = 0;
                 memset(g_rx_buffer, 0, RX_BUFFER_SIZE);
             }
@@ -1186,6 +1201,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 /* USER CODE END 4 */
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -1195,7 +1211,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
+  // __disable_irq();  // Disabled: kills USB IRQ, preventing CDC serial from working
   while (1)
   {
   }
@@ -1217,3 +1233,6 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+

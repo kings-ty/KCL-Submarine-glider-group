@@ -1,4 +1,0 @@
-../Core/Src/drivers/dfr0601_motor.c:3:13:pwm_set	5
-../Core/Src/drivers/dfr0601_motor.c:8:6:DfrMotor_Init	1
-../Core/Src/drivers/dfr0601_motor.c:13:6:DfrMotor_Stop	1
-../Core/Src/drivers/dfr0601_motor.c:19:6:DfrMotor_Set	3

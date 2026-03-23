@@ -5,7 +5,7 @@
 
 #include "actuators/linear_actuator.h"
 #include "app/system_check.h"
-#include "app/mission.h"
+#include "app/motion.h"
 
 #ifdef __cplusplus
 extern "C" {
