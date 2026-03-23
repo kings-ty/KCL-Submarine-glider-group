@@ -66,6 +66,8 @@ void setup() {
   Serial.begin(115200);
   SerialSTM.begin(115200, SERIAL_8N1, 18, 17);
   Mcu.begin(0, 0); 
+  SerialSTM.begin(115200, SERIAL_8N1, 18, 17);
+  Mcu.begin(0, 0); 
 
   pinMode(45, OUTPUT);
   digitalWrite(45, LOW); 
@@ -83,6 +85,8 @@ void setup() {
                     LORA_PREAMBLE_LENGTH, false,
                     true, 0, 0, false, 3000);
 
+  Serial.println("\n--- ESP32 Ready (20-Sample Average Mode) ---");
+}
   Serial.println("\n--- ESP32 Ready (20-Sample Average Mode) ---");
 }
 
@@ -115,7 +119,9 @@ void loop() {
     // Read dissolved oxygen from I2C sensor
     Wire.beginTransmission(DO_I2C_ADDR);
     Wire.write('R'); 
+    Wire.write('R'); 
     Wire.endTransmission();
+    delay(600); 
     delay(600); 
     Wire.requestFrom(DO_I2C_ADDR, 20);
     byte code = Wire.read();
@@ -125,7 +131,12 @@ void loop() {
       do_data[i++] = Wire.read();
     }
     do_data[i] = '\0'; 
+    do_data[i] = '\0'; 
 
+    if (code == 1) { 
+      i2cO2Samples[sampleCount] = String(do_data).toFloat(); 
+    } else { 
+      i2cO2Samples[sampleCount] = -1.0; 
     if (code == 1) { 
       i2cO2Samples[sampleCount] = String(do_data).toFloat(); 
     } else { 
@@ -134,41 +145,28 @@ void loop() {
 
     sampleCount++;
     Serial.print("Data Collected: "); Serial.print(sampleCount); Serial.println("/20");
+    // ==============================================
+    // 🖨️ Print Detailed Logs in English
+    // ==============================================
+    if (sampleCount >= NUM_SAMPLES){
 
-    // =========================================================
-    // 📈 3. When 20 samples (1 minute worth) are collected -> calculate average and send!
-    // =========================================================
-    if (sampleCount >= NUM_SAMPLES) {
-      
-      // Remove top/bottom 2 (TrimCount=2) for noise reduction, then calculate mean value
-      float avgPh = getTrimmedMean(phSamples, NUM_SAMPLES, 2);
-      float avgEc = getTrimmedMean(ecSamples, NUM_SAMPLES, 2);
-      float avgADo = getTrimmedMean(aDoSamples, NUM_SAMPLES, 2);
-      float avgI2cO2 = getTrimmedMean(i2cO2Samples, NUM_SAMPLES, 2);
-
-      // Create the payload with the averaged values (including latest STM32 depth)
-      String dataMsg = "D:" + String(latestDepth) + ",T:" + String(latestTemp) + 
-                       ",PH:" + String(avgPh) + ",EC:" + String(avgEc) + 
-                       ",aDO:" + String(avgADo) + ",O2:" + String(avgI2cO2);
-      
-      Serial.println("\n=========================================");
-      Serial.println("[20-Sample Averaged Payload]");
-      Serial.println(dataMsg);
-      
-      // 🚀 Action A: Send to base station via LoRa
-      Radio.Send((uint8_t *)dataMsg.c_str(), dataMsg.length());
-      
-      // 💾 Action B: Send to STM32 to save to SD card!
-      // Add "SDLOG:" prefix to help STM32 recognize the command.
-      SerialSTM.println("SDLOG:" + dataMsg); 
-      
-      Serial.println("=========================================\n");
-
-      // Reset sample counter (for the next 1 minute)
-      sampleCount = 0;
+    
+    // 4. Create Payload String for Base Station
+    // Used 'aDO' for analog and 'O2' for the new I2C sensor
+    String dataMsg = "D:" + String(depth) + ",T:" + String(waterTemp) + 
+                     ",PH:" + String(phVolt) + ",EC:" + String(ecVolt) + 
+                     ",aDO:" + String(aDoVolt) + ",O2:" + i2cO2Str;
+    
+    Serial.print("[Tx Payload] => ");
+    Serial.println("\n[1 Min Avg Payload] => " + dataMsg);
+    // 5. Fire LoRa Radio!
+    Radio.Send((uint8_t *)dataMsg.c_str(), dataMsg.length());
+    // Fire STM32
+    SerialSTM.println(dataMsg);
+    sampleCount = 0;
     }
   }
 
-  // Must-have: LoRa background process
+  // Essential background process for LoRa radio
   Radio.IrqProcess(); 
 }
