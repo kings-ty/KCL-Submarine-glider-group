@@ -17,6 +17,10 @@ void App_Tick(void);
 // Accessors (optional for now)
 GliderState* App_State(void);
 
+// Remote control (LoRa CMD:RUN / CMD:EMERGENCY)
+void App_SetRunMode(uint8_t run);    // 1=Start cruise, 0=Stop
+void App_EmergencyAscent(void);      // Emergency ascent
+
 #ifdef __cplusplus
 }
 #endif
