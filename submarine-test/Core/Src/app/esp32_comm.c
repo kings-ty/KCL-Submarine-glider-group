@@ -1,4 +1,5 @@
-#include "esp32_comm.h"
+#include "app/esp32_comm.h"
+#include "app/stm32_sdlog_receiver.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -13,6 +14,9 @@ void ESP32_Comm_Init(UART_HandleTypeDef *huart) {
 
 // 2️⃣ Process Data (Called directly from main.c's Rx Callback)
 void ESP32_Process_Data(const char* data) {
+    // Save SDLOG data to SD card
+    sdlog_parse_and_save(data);
+
     // Find the starting position of "D:"
     char *d_ptr = strstr(data, "D:"); 
     

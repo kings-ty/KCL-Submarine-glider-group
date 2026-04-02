@@ -29,9 +29,9 @@
 #include <stdbool.h>
 #include <math.h>
 #include "usbd_cdc_if.h"
-#include "esp32_comm.h"
+#include "app/esp32_comm.h"
 #include "app/app.h"
-#include "fatfs.h" // For SD Logging (Uncomment after generating FATFS in CubeMX)
+#include "app/stm32_sdlog_receiver.h"
 
 extern RTC_HandleTypeDef hrtc; // (Uncomment after generating RTC in CubeMX)
 /* USER CODE END Includes */
@@ -61,6 +61,8 @@ I2C_HandleTypeDef hi2c2;
 RTC_HandleTypeDef hrtc;
 
 SD_HandleTypeDef hsd;
+DMA_HandleTypeDef hdma_sdio_rx;
+DMA_HandleTypeDef hdma_sdio_tx;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
@@ -69,7 +71,7 @@ UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-
+    // Check current mode
 volatile bool g_esp_line_received = false;
 char g_esp_process_buffer[RX_BUFFER_SIZE];
 GliderState g_glider_state; // Global glider state variable
@@ -77,7 +79,7 @@ GliderState g_glider_state; // Global glider state variable
 // --- Non-blocking Delay Variables ---
 uint32_t g_last_tx_time = 0;
 const uint32_t TX_INTERVAL_MS = 1000; // 1 second (Changed back from 1 minute)
-
+    // Check calibration status
 // --- IMU Variables ---
 uint8_t bno_data[6];
 uint8_t mpu_data[14];
@@ -101,7 +103,7 @@ volatile bool g_line_received = false;
 char g_process_buffer[RX_BUFFER_SIZE];
 
 // Uncomment the below variables after generating FATFS in CubeMX
-// FATFS fs;
+    // Check current mode
 // FIL file;
 // FRESULT fres;
 /* USER CODE END PV */
@@ -109,6 +111,7 @@ char g_process_buffer[RX_BUFFER_SIZE];
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_I2C1_Init(void);
@@ -158,6 +161,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USB_DEVICE_Init();
   MX_USART2_UART_Init();
   MX_TIM2_Init();
@@ -170,11 +174,11 @@ int main(void)
   MX_SDIO_SD_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
-  MX_TIM1_Init();
-  MX_USART3_UART_Init();
-  MX_RTC_Init();
-  MX_SDIO_SD_Init();
-  MX_FATFS_Init();
+  if (sdlog_init() == HAL_OK) {         // (Added)
+       send_log("[SD] SD card mounted OK\r\n");
+   } else {
+       send_log("[SD] SD card mount FAILED\r\n");
+   }
   /* USER CODE BEGIN 2 */
   // Initialize glider state
   memset(&g_glider_state, 0, sizeof(GliderState));
@@ -342,7 +346,12 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     App_Tick();
-
+    sdlog_task();
+    if (g_emergencyAscent) {   // (Added: Emergency ascent processing)
+            send_log("[EMERGENCY] Ascent command received!\r\n");
+            App_EmergencyAscent();
+            g_emergencyAscent = 0;
+        }
     // --- TASK: Handle incoming serial data from PC or ESP32 ---
     if (g_line_received) {
             process_serial_command((uint8_t*)g_process_buffer, strlen(g_process_buffer));
@@ -358,6 +367,13 @@ int main(void)
 
             // [2] Perform existing data analysis (SDLOG check, etc.)
             ESP32_Process_Data(g_esp_process_buffer);
+
+            // [3] LoRa command relay processing
+            if (strncmp(g_esp_process_buffer, "CMD:RUN", 7) == 0) {
+                App_SetRunMode(1);
+            } else if (strncmp(g_esp_process_buffer, "CMD:STOP", 8) == 0) {
+                App_SetRunMode(0);
+            }
 
             g_esp_line_received = false; // Processing complete
         }
@@ -752,7 +768,7 @@ static void MX_SDIO_SD_Init(void)
   hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
   hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
   hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd.Init.ClockDiv = 0;
+  hsd.Init.ClockDiv = 4;  // 8MHz (48MHz/6) - compatible with most SD cards, 0 is too fast
   /* USER CODE BEGIN SDIO_Init 2 */
 
   /* USER CODE END SDIO_Init 2 */
@@ -940,6 +956,25 @@ static void MX_USART3_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
+  /* DMA2_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream6_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -1032,29 +1067,9 @@ static void MX_GPIO_Init(void)
   * @param  message: The string to send.
   * @retval None
   */
-void ESP32_Process_Data(const char* data) {
-    // 1. Print entire data log from ESP32 (Finally showing it!)
-    char log_msg[RX_BUFFER_SIZE + 20];
-    snprintf(log_msg, sizeof(log_msg), "[ESP32_RAW] %s\r\n", data);
-    send_log(log_msg);
-
-    // 2. Find position of "D:" string (Depth check and transmission control)
-    char *d_ptr = strstr(data, "D:");
-    if (d_ptr != NULL) {
-        float depth = atof(d_ptr + 2);
-        if (depth >= 1.0f) {
-            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_OK\n", 8, 100);
-        } else {
-            HAL_UART_Transmit(&huart3, (uint8_t*)"SEND_NO\n", 8, 100);
-        }
-    }
-
-    // 3. If "PH:" is in data, extract pH value (Optional)
-    char *ph_ptr = strstr(data, "PH:");
-    if (ph_ptr != NULL) {
-        // g_glider_state.sensors.ph = atof(ph_ptr + 3); // Use when PH variable is added
-    }
-}
+/* ESP32_Process_Data is defined in Core/Src/app/esp32_comm.c.
+   Add the call to sdlog_parse_and_save() in esp32_comm.c
+   or call it directly from the esp_line_received block in main.c. */
 
 void send_log(const char* message) {
     HAL_UART_Transmit(&UART_HANDLE, (uint8_t*)message, strlen(message), 100);
@@ -1162,6 +1177,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     // =======================================================
     else if (huart->Instance == huart3.Instance)
     {
+    	sdlog_check_emergency_byte(esp_rx_data);
         if (esp_rx_data == '\n' || esp_rx_data == '\r')
         {
             if (esp_rx_index > 0)
@@ -1201,7 +1217,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 /* USER CODE END 4 */
-/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -1233,6 +1248,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-
-
-

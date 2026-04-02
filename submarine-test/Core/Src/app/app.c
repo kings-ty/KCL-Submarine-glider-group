@@ -8,7 +8,7 @@
 
 // Set to 1 to run the bench-test actuator demo (auto-starts, no serial command needed).
 // Set to 0 for normal mission mode (send "CMD:MOTOR_ON" via USB serial to start).
-#define DEMO_MODE  1
+#define DEMO_MODE  0
 
 // Handles created in main.c by CubeMX
 extern ADC_HandleTypeDef hadc1;   // PA0 - O2 sensor (ADC1_IN0)
@@ -17,6 +17,35 @@ extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
 extern TIM_HandleTypeDef htim1;
 extern UART_HandleTypeDef huart3;
+
+// ============================================================
+// Telemetry buffer for burst transmission to ESP32 upon surfacing
+// ============================================================
+#define TEL_BUF_SIZE     180   // Max 180 seconds (3 mins) @ 1Hz
+#define SURFACE_DEPTH_M   0.5f // Below this depth = near surface
+#define SUBMERGE_DEPTH_M  1.0f // Above this depth = judged as submerged
+
+typedef struct {
+    uint32_t timestamp_ms;
+    float    depth;
+    float    temp;
+    float    pitch;
+    float    roll;
+    float    yaw;
+    float    voltage;
+    float    o2;
+    uint8_t  status;
+    uint8_t  tinyml;
+} TelRecord_t;
+
+static TelRecord_t s_telBuf[TEL_BUF_SIZE];
+static uint16_t    s_telHead  = 0;   // Next write position
+static uint16_t    s_telCount = 0;   // Number of records stored
+static uint8_t     s_wasSubmerged = 0; // Submerged status flag
+static float       s_prevDepth    = 0.0f;
+
+extern float yaw, roll, pitch;
+
 // App state
 static GliderState s_state;
 
@@ -45,7 +74,98 @@ GliderState* App_State(void)
     return &s_state;
 }
 
-extern float yaw, roll, pitch;
+// ============================================================
+// Store one current telemetry record in buffer (called every second)
+// ============================================================
+static void telBuf_push(float depth, float temp, float voltage, float o2)
+{
+    TelRecord_t *r = &s_telBuf[s_telHead];
+    r->timestamp_ms = HAL_GetTick();
+    r->depth   = depth;
+    r->temp    = temp;
+    r->pitch   = pitch;
+    r->roll    = roll;
+    r->yaw     = yaw;
+    r->voltage = voltage;
+    r->o2      = o2;
+    r->status  = s_state.status;
+    r->tinyml  = s_state.tinyml_result;
+
+    s_telHead = (s_telHead + 1) % TEL_BUF_SIZE;
+    if (s_telCount < TEL_BUF_SIZE) s_telCount++;
+}
+
+// ============================================================
+// Burst transmit entire buffer to ESP32
+//   Format: TEL:<ms>,<depth>,<temp>,<pitch>,<roll>,<yaw>,<volt>,<o2>,<st>,<ml>\n
+// ============================================================
+static void telBuf_sendAll(void)
+{
+    if (s_telCount == 0) return;
+
+    // Header
+    const char *header = "BULK_START\n";
+    HAL_UART_Transmit(&huart3, (uint8_t*)header, strlen(header), 100);
+    send_log("[TEL] Burst sending to ESP32...\r\n");
+
+    // Transmit in order from oldest record
+    uint16_t start = (s_telHead - s_telCount + TEL_BUF_SIZE) % TEL_BUF_SIZE;
+    for (uint16_t i = 0; i < s_telCount; i++) {
+        uint16_t idx = (start + i) % TEL_BUF_SIZE;
+        TelRecord_t *r = &s_telBuf[idx];
+
+        char msg[160];
+        int len = snprintf(msg, sizeof(msg),
+            "TEL:%lu,%.2f,%.2f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d\n",
+            r->timestamp_ms, r->depth, r->temp,
+            r->pitch, r->roll, r->yaw,
+            r->voltage, r->o2, r->status, r->tinyml);
+        HAL_UART_Transmit(&huart3, (uint8_t*)msg, len, 200);
+        HAL_Delay(5);  // Guard ESP32 UART buffer
+    }
+
+    // Footer
+    const char *footer = "BULK_END\n";
+    HAL_UART_Transmit(&huart3, (uint8_t*)footer, strlen(footer), 100);
+
+    char logmsg[60];
+    snprintf(logmsg, sizeof(logmsg), "[TEL] Sent %d records\r\n", s_telCount);
+    send_log(logmsg);
+
+    // Clear buffer
+    s_telCount = 0;
+    s_telHead  = 0;
+}
+
+// ============================================================
+// App_SetRunMode() - Called when LoRa "RUNNING" command is received
+//   run=1: Buoyancy chamber activation (Ascent -> Start cruise)
+//   run=0: Stop
+// ============================================================
+void App_SetRunMode(uint8_t run)
+{
+    uint32_t now = HAL_GetTick();
+    if (run) {
+        s_state.is_motor_on = true;
+        Act_Extend(&s_buoy, now);   // Ascent -> underwater cruise
+        send_log("[APP] RUNNING command: buoy EXTEND\r\n");
+    } else {
+        s_state.is_motor_on = false;
+        Act_Stop(&s_buoy);
+        send_log("[APP] STOP command\r\n");
+    }
+}
+
+// ============================================================
+// App_EmergencyAscent() - Maximise buoyancy to surface in emergency
+// ============================================================
+void App_EmergencyAscent(void)
+{
+    uint32_t now = HAL_GetTick();
+    s_state.is_motor_on = false; // 다른 미션 로직 정지
+    Act_Extend(&s_buoy, now);    // Maximize buoyancy (exhaust water -> float)
+    send_log("[APP] EMERGENCY ASCENT: buoy EXTEND\r\n");
+}
 
 static void App_LogTelemetry(void)
 {
@@ -118,13 +238,8 @@ void App_Init(void)
     // Yellow -> 3.3V, White -> GND (not STM32 pins, use power header)
     // In DEMO_MODE run purely timed (no position feedback fighting the demo steps).
     // Set has_pos=1 and hadc in normal mission mode when target_adc is properly set.
-#if DEMO_MODE
     s_buoy.has_pos = 0;
     s_buoy.hadc    = NULL;
-#else
-    s_buoy.has_pos = 1;
-    s_buoy.hadc    = &hadc2;
-#endif
     Act_Init(&s_buoy, now);
 
     // ----------------------------
@@ -162,7 +277,7 @@ void App_Init(void)
     // System check + mission/demo
     SystemCheck_Init(&s_sys);
     Motion_Init(&s_motion);
-    Mission_Init(&s_mission);
+    // Mission_Init(&s_mission);  // ← 제거: s_mission 미선언, Mission_Init 미존재
     // Initialize MS5837 Depth Sensor on hi2c2
     s_depth_sensor_ok = MS5837_Init(&s_depth_sensor, &hi2c2);
     if(s_depth_sensor_ok) {
@@ -193,47 +308,23 @@ void App_Tick(void)
 #if DEMO_MODE
         Demo_Update(&s_demo, now, &s_buoy, &s_mass, &s_stepper);
 #else
-        /* --- 3-Second Test Logic (Ignores System Check & Mission) --- */
-        /*
-        if (!s_sys.done) {
-            SystemCheck_Update(&s_sys, now, &hi2c1, &hadc1);
-        } else {
-            Motion_Update(&s_motion, now, &s_state, &s_buoy, &s_mass, &s_stepper);
-        }
-        */
+        // --- Cruising test (Only works when is_motor_on == true) ---
+        if (s_state.is_motor_on) {
+            static uint32_t s_last_test = 0;
+            static bool is_extending = true;
 
-        static uint32_t s_last_test = 0;
-        static bool is_extending = false;
-
-        if ((now - s_last_test) >= 3000) { // Toggle every 3 seconds
-            s_last_test = now;
-            
-            if (is_extending) {
-                Act_Retract(&s_buoy, now);
-                send_log("[TEST] Current Action: RETRACTING (3 sec)\r\n");
-                is_extending = false;
-            } else {
-                Act_Extend(&s_buoy, now);
-                send_log("[TEST] Current Action: EXTENDING (3 sec)\r\n");
-                is_extending = true;
-            }
-        }
-        */
-
-        static uint32_t s_last_test = 0;
-        static bool is_extending = false;
-
-        if ((now - s_last_test) >= 3000) { // Toggle every 3 seconds
-            s_last_test = now;
-            
-            if (is_extending) {
-                Act_Retract(&s_buoy, now);
-                send_log("[TEST] Current Action: RETRACTING (3 sec)\r\n");
-                is_extending = false;
-            } else {
-                Act_Extend(&s_buoy, now);
-                send_log("[TEST] Current Action: EXTENDING (3 sec)\r\n");
-                is_extending = true;
+            if ((now - s_last_test) >= 10000) { // 10s (10000ms) interval
+                s_last_test = now;
+                
+                if (is_extending) {
+                    Act_Retract(&s_buoy, now);
+                    send_log("[TEST] Target Action: RETRACTING (10 sec)\r\n");
+                    is_extending = false;
+                } else {
+                    Act_Extend(&s_buoy, now);
+                    send_log("[TEST] Target Action: EXTENDING (10 sec)\r\n");
+                    is_extending = true;
+                }
             }
         }
 #endif
@@ -258,6 +349,25 @@ void App_Tick(void)
 
         s_state.status = rand() % 3;
         s_state.tinyml_result = rand() % 2;
+
+        // -- 1. Save to telemetry buffer --
+        float cur_depth = s_state.sensors.depth;
+        telBuf_push(cur_depth, s_depth_sensor_ok ? s_depth_sensor.temperature_c : 0.0f,
+                    s_state.sensors.voltage, s_state.sensors.o2);
+
+        // -- 2. Detect submerge entry --
+        if (cur_depth >= SUBMERGE_DEPTH_M) {
+            s_wasSubmerged = 1;
+        }
+
+        // -- 3. Detect surfacing -> Burst transmit to ESP32 --
+        if (s_wasSubmerged && cur_depth < SURFACE_DEPTH_M && s_prevDepth >= SURFACE_DEPTH_M) {
+            // Moment when depth goes below 0.5m (Entering surface)
+            send_log("[TEL] Surfacing detected! Sending burst to ESP32...\r\n");
+            telBuf_sendAll();
+            s_wasSubmerged = 0;
+        }
+        s_prevDepth = cur_depth;
 
         App_LogTelemetry();
     }
