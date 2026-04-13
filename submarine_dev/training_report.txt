@@ -1,0 +1,71 @@
+=================================================================
+AUV Anomaly Detection System - Final Training Report
+InWaterSense Dataset (Ahmedi 2021, Mendeley Data)
+Generated: 2026-03-24 11:05:46
+=================================================================
+
+[ DATASET SUMMARY ]
+  Dataset       : InWaterSense
+  Channels      : pH, EC, DO (O2=0, depth=0, IMU=0)
+  Window Size   : 64 samples (10-min data, 10-min interval)
+  Window Stride : 16
+  Feature Dim   : 30 per window
+  Total Windows : 1,862
+
+[ LABEL DISTRIBUTION ]
+  NORMAL              :    1,317 (70.7%)
+  MOTION_ARTIFACT     :        0 (0.0%)
+  SENSOR_FAULT        :      529 (28.4%)
+  ENV_ANOMALY         :       16 (0.9%)
+
+[ AUTOENCODER (Step 5) ]
+  Architecture : 30 → 16(relu) → 8(relu) → 16(relu) → 30(sigmoid)
+  Loss         : MSE
+  Optimizer    : Adam (lr=0.001)
+  Epochs       : 100 (with EarlyStopping)
+  Batch Size   : 32
+  Val Split    : 15%
+
+[ CLASSIFIER (Step 7) ]
+  Architecture : 30 → 32(relu, drop 0.2) → 16(relu, drop 0.1) → 4(softmax)
+  Loss         : Categorical Crossentropy
+  Optimizer    : Adam (lr=0.001)
+  Epochs       : 80 (with EarlyStopping + ReduceLROnPlateau)
+  Batch Size   : 32
+  Val Split    : 15%
+  Train/Test   : 80% / 20% (stratified)
+
+[ QUANTIZATION (Step 8) ]
+  Method       : INT8 Full Quantization (tf.lite.Optimize.DEFAULT)
+  Rep. Dataset : 300 stratified samples
+  Input Type   : INT8 (ESP32 TFLite Micro compatible)
+  Output Type  : INT8
+
+[ PERFORMANCE COMPARISON ]
+  Metric                             FP32       INT8        Δ
+  ----------------------------------------------------------
+  Model Size (KB)                   8.61       5.64  +1.5x
+  Accuracy (%)                     97.32      96.03  +1.29%p
+  F1 Score (macro)                 0.7799      0.7967  -0.016802
+  Inference (est, ESP32)            ~3 ms       ~1 ms  ~3x faster
+  RAM tensor arena (est)            ~8 KB       ~4 KB  ~2x smaller
+
+[ CLASS-WISE F1 SCORE ]
+  Class                    FP32 F1   INT8 F1
+  ------------------------------------------
+  NORMAL                    0.9868    0.9758
+  SENSOR_FAULT              0.9528    0.9342
+  ENV_ANOMALY               0.4000    0.4800
+
+[ OUTPUT FILES ]
+  ./auv_classifier_int8.h   : C array (ESP32 TFLite Micro)
+  ./auv_norm_params.h       : Normalization parameters (FEAT_MINS, FEAT_RANGES)
+  ./confusion_matrix.png    : Confusion matrix (200dpi)
+  ./training_report.txt     : This report
+
+[ NOTES ]
+  - O2, depth, IMU channels are zeroed (InWaterSense = river surface)
+  - Activate when deploying on actual AUV with full sensor suite
+  - MOTION_ARTIFACT class likely empty (IMU=0 in this dataset)
+  - Retrain with AUV-collected data for production deployment
+=================================================================
