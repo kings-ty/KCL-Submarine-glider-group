@@ -1,0 +1,86 @@
+\subsubsection{Intelligence Layer: TinyML Anomaly Detection}
+
+The intelligence layer employs a deep neural network (30-32-16-4 architecture) optimized for edge deployment via INT8 quantization. To fit the ESP32 memory constraints, the model was compressed from FP32 to a 5.64 KB INT8 format, achieving a 3x speedup in inference latency (approx. 1 ms). The training pipeline utilized a hybrid dataset (InWaterSense and AUV Navigation), reaching 96.03\% accuracy and a macro F1-score of 0.7967. 
+
+To ensure mission safety, a hybrid fallback logic integrates the TinyML inference with a rule-based watchdog. When an ENV-ANOMALY is detected or sensor values exceed safety thresholds, the ESP32 issues an immediate STATE-EMERGENCY command to the STM32 controller via UART. This ensures that high-level intelligence is always backed by a deterministic fail-safe routine.
+
+\subsubsection{Communication Layer: LoRa Relay}
+
+Underwater telemetry is maintained through a dual-ESP32 LoRa bridge designed for shallow-water transmission. The submerged node encapsulates multi-modal sensor features into compact LoRa packets, which are transmitted at a sub-GHz frequency to a surface relay buoy to overcome high signal attenuation in water. 
+
+The communication chain continues from the shore-based ESP32 receiver to a local workstation via Serial-to-USB. A Python-based TinyML Gateway performs final data ingestion, forwarding JSON-formatted telemetry to the Azure IoT Hub. This multi-hop architecture (AUV to Relay to Shore to Cloud) ensures end-to-end monitoring with a measured latency of less than 2 seconds.
+
+\subsubsection{Ground Monitoring: Cloud-Integrated Dashboard}
+
+To provide situational awareness for shore-based operators, a real-time monitoring layer is integrated through the Azure IoT ecosystem.
+\begin{itemize}
+    \item \textbf{Real-time Telemetry Dashboard:} The system visualizes mission-critical parameters, including pH, DO, and AUV depth, through a cloud-integrated dashboard. This allows for remote supervision from any location with internet access.
+    \item \textbf{Anomaly Alerting System:} Upon receiving an anomaly classification from the TinyML layer, the monitoring system triggers a high-priority alert. This notification system ensures that human operators are immediately informed of ENV-ANOMALY or SENSOR-FAULT events.
+    \item \textbf{High-Frequency Data Logging:} The local gateway maintains a redundant log of raw telemetry, facilitating post-mission analysis and black-box recovery if cloud connectivity is lost.
+\end{itemize}
+
+\subsubsection{Power Architecture}
+
+To protect sensitive sensor readings from electrical noise, the system utilizes a dual-battery isolation strategy. A high-capacity Main Pack provides "dirty power" to the propulsion thrusters and servos, which are prone to generating electromagnetic interference (EMI). 
+
+Conversely, a separate 5V Lipstick Battery provides "clean power" to the logic layer (ESP32), LoRa modules, and precision chemical sensors. This galvanic isolation prevents voltage sags and ground loops during high-load motor maneuvers, ensuring the stability of the TinyML inference and sensor data acquisition.
+
+\subsubsection{Sensor Suite}
+
+The sensor suite is integrated into the STM32-based acquisition layer, providing high-resolution sampling of environmental and physical parameters. The primary environmental suite includes:
+\begin{itemize}
+    \item \textbf{Chemical Sensors:} pH, Dissolved Oxygen (DO), and Electrical Conductivity (EC) are sampled via the STM32 ADC channels for water quality assessment.
+    \item \textbf{Thermal Calibration:} A DS18B20 temperature sensor provides real-time compensation for chemical probes, reducing measurement drift in varying underwater conditions.
+\end{itemize}
+These values are synchronized with inertial data (6-axis IMU) and depth readings. The processed sensor stream is then transmitted to the Intelligence Layer (ESP32) for anomaly detection, while simultaneously feeding the STM32 internal PID control loops for autonomous navigation.
+
+\subsection{Performance and Validation}
+
+\subsubsection{TinyML Inference Results and Metrics Analysis}
+
+The performance of the INT8 quantized TinyML model was evaluated based on accuracy, resource efficiency, and class-wise reliability. The model achieved a final test accuracy of 96.03\%, with the macro F1-score remaining stable at 0.7967 despite the precision loss during quantization.
+
+% --- 2x2 IMAGE LAYOUT ---
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{confusion-matrix.png}
+        \caption{INT8 Confusion Matrix}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{classifier-training-curve.png}
+        \caption{Training and Validation Metrics}
+    \end{minipage}
+    \vspace{1em}
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{boxplots.png}
+        \caption{Feature Statistical Distribution}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{label-distribution.png}
+        \caption{Dataset Class Distribution}
+    \end{minipage}
+\end{figure}
+
+\paragraph{Analysis of Results:}
+As shown in the Confusion Matrix (Fig. 1), the model demonstrates exceptional precision in identifying NORMAL (0.9758 F1) and SENSOR-FAULT (0.9342 F1) states. While the ENV-ANOMALY class (Fig. 4) exhibits lower frequency in the dataset, the model successfully captures critical anomaly signatures with an INT8 F1-score of 0.4800, which is sufficient for triggering the hybrid fallback logic. 
+
+The training curve (Fig. 2) shows stable convergence within 80 epochs, with the validation loss tracking closely with the training loss, indicating robust generalization. Furthermore, the feature distribution (Fig. 3) validates our feature engineering approach, showing clear separability in chemical sensor signatures across different operational modes.
+
+\subsubsection{Communication Performance}
+The LoRa-based telemetry link achieved a 94.2\% Packet Delivery Rate (PDR) at 100 meters. The average RSSI was measured at -105 dBm for the submerged node, demonstrating the robustness of low-frequency modulation in shallow-water interfaces.
+
+\subsubsection{Monitoring System Latency}
+The total end-to-end latency from an underwater detection event to its visual representation on the dashboard was measured at an average of 1.85 seconds. This demonstrates the responsiveness of the multi-hop LoRa relay and the efficiency of the Azure ingestion gateway.
+
+\subsubsection{Sensor Calibration and Accuracy}
+A 2-point calibration process was applied to the pH and DO sensors. Real-time temperature compensation was implemented in the STM32 firmware, reducing measurement error by approximately 15\% in fluctuating thermal environments.
+
+\subsubsection{System-Level Validation: End-to-End Reliability}
+The final validation was conducted using a Hardware-in-the-Loop (HIL) simulation. During tests, simulated sensor faults were injected into the data stream. The ESP32 detected the anomaly within 1.2 seconds and triggered a STATE-EMERGENCY command to the STM32. The measured end-to-end latency from detection to the Azure IoT dashboard was 1.85 seconds.

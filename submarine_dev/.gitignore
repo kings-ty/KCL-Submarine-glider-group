@@ -1,0 +1,3 @@
+*.csv
+**/individual_samples/*.csv
+ml-data/*.csv
