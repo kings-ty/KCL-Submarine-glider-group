@@ -1,69 +1,136 @@
 # KCL Submarine Glider Group
 
-수중 글라이더/소형 AUV 기반 **수질 모니터링 + TinyML 이상탐지 + LoRa 중계 통신** 프로젝트입니다.  
-이 README는 저장소 내 코드/보고서(`submarine_dev/training_report.txt`, `submarine_dev/final_report_sections.md`)를 바탕으로 전체 내용을 통합 정리한 문서입니다.
+Autonomous underwater glider project for **water-quality monitoring in Lake Victoria** using a circular reuse strategy, TinyML edge intelligence, and LoRa-based telemetry.
 
-## 1) 프로젝트 목표
+This README is written in English from your final report content and assessment feedback.
 
-- 수중 환경 센서 데이터(pH, DO, EC, 온도, IMU, 깊이)를 수집
-- 엣지 디바이스(ESP32)에서 TinyML로 이상 상태를 실시간 분류
-- LoRa 릴레이 및 Azure IoT 연동으로 원격 모니터링
-- 이상 탐지 시 STM32 제어기로 긴급 상태(`STATE_EMERGENCY`) 전달
+## Chapter 1. Introduction
 
-## 2) 시스템 구성 요약
+### 1.1 Problem Statement and Societal Relevance
+Lake Victoria supports over 42 million livelihoods but is increasingly threatened by untreated wastewater and agricultural runoff.  
+The project addresses this challenge through a low-cost, low-impact autonomous monitoring platform aligned with **SDG 6 (Clean Water)** and **SDG 14 (Life Below Water)**.
 
-- **제어/센서 계층 (STM32)**  
-  수질 센서 및 관성/깊이 데이터를 수집하고 제어 루프를 수행
-- **지능 계층 (ESP32 TinyML)**  
-  INT8 양자화 모델로 실시간 이상탐지 수행
-- **통신 계층 (LoRa 듀얼 ESP32 브리지)**  
-  수중 노드 → 수면 릴레이 → 육상 수신기로 데이터 전달
-- **모니터링 계층 (Python Gateway + Azure IoT)**  
-  JSON 텔레메트리 업링크 및 대시보드/알림 제공
-- **전원 구조 (Dual Battery)**  
-  추진계와 로직/센서 전원을 분리해 노이즈 영향 최소화
+### 1.2 Pre-study and Design Validation
+Early Python simulations were used to validate buoyancy engine parameters and confirm the feasibility of sawtooth trajectory operation for the glider mass profile.
 
-## 3) TinyML 학습 파이프라인
+### 1.3 Individual Contribution and Technical Justification
+The core contribution focused on the **intelligence and communication layers**:
+- Multi-board distributed architecture (ESP32 for AI/comms + STM32 for control/sensing)
+- Dual-ESP32 LoRa bridge for robust, low-cost telemetry
+- TinyML anomaly detection for on-board prioritisation of critical events
 
-`submarine_dev/step1_eda_tinyml.py` ~ `step9_final_report_tinyml.py`로 단계별 구성:
+This software stack was essential for reliable recovery, enabling circular reuse of the 17.5 kg steel pressure hull from the 2025 platform.
 
-1. 데이터 탐색/전처리
-2. 윈도우 기반 특징 추출
-3. 정규화
-4. 오토인코더/분류기 학습
-5. INT8 양자화 및 임베디드 배포 산출물 생성
-6. 최종 리포트 생성
+### 1.4 Reflective Analysis Framework
+The report reflects on system impact through project management, values/stakeholder analysis, sustainability ethics, LCA, and reliability (FMEA).  
+A central finding is that TinyML+LoRa both enables reuse and introduces top-priority risk requiring hybrid fail-safe logic.
 
-주요 산출물:
-- `submarine_dev/auv_classifier_int8.h`
-- `submarine_dev/auv_norm_params.h`
-- `submarine_dev/confusion_matrix.png`
-- `submarine_dev/training_report.txt`
+## Chapter 2. Project Management, Values Thinking, and Stakeholder Dialogue
 
-## 4) 핵심 결과 (보고서 기준)
+### 2.1 Project Management and Technical Leadership
+- Initial planning: WBS + Gantt for deliverables and critical path
+- Mid-project pivot: Kanban Agile due to procurement delays and dependency uncertainty
+- Team enablement: strength-based delegation, preconfigured environments, and SOP-driven collaboration
 
-### TinyML 성능
-- 모델 구조: `30 → 32 → 16 → 4`
-- INT8 모델 크기: **5.64 KB** (FP32 8.61 KB 대비 축소)
-- 정확도: **96.03%**
+### 2.2 Values Thinking: Efficiency vs Responsibility
+Low-cost rapid prototyping (PLA parts) improved feasibility, but ethical trade-offs were explicitly considered (microplastic risk, material lifecycle limits).  
+Prototype decisions prioritized practical deployment while planning transition to more sustainable production materials.
+
+### 2.3 Stakeholder Dialogue
+The design balanced:
+- **Fishers / marine biologists**: strong in-situ sensing coverage
+- **Regulators**: habitat safety and recoverability requirements
+
+Fail-to-float and LoRa-based recovery strategy established a non-intrusive middle-ground solution.
+
+## Chapter 3. Sustainability and Ethics
+
+### 3.1 Doughnut Framing and Systems Perspective
+The project was mapped to environmental boundaries and social foundations, linking biosphere protection with equitable access to water-quality intelligence.
+
+### 3.2 Causal-Loop Insight
+- **Reinforcing loop (R1):** better intelligence → better recovery → better asset reuse → lower per-mission impact
+- **Balancing loop (B1):** higher data frequency → higher energy demand → battery constraints
+
+### 3.3 Circular Economy Strategy
+Hybrid material strategy:
+- Reused high-mass steel hull (long-life structural asset)
+- Replaceable lightweight components for adaptation
+- Software intelligence as a life-extension multiplier for physical assets
+
+### 3.4 Reflective Ethics and SDG Trade-offs
+Key reflections included SDG synergies/trade-offs, data transparency vs operational security, and governance needs for responsible open environmental data.
+
+### 3.5 Professional Ethics
+Engineering decisions were framed around integrity, environmental respect, rigor, and communication/leadership principles.
+
+## Chapter 4. Life Cycle Assessment (LCA)
+
+### 4.1 Method and Circular Baseline
+ISO 14040-style framing was applied to compare:
+- Circular reuse strategy (2026 upgrade)
+- Full-manufacture baseline
+- Alternative composite-hull scenario
+
+Functional unit: one successful 48-hour monitoring mission, amortised across a 50-mission design life.
+
+### 4.2 Key LCA Interpretation
+- Circular reuse significantly reduced total impact versus full-manufacture assumptions
+- Intelligence layer (TinyML + LoRa) acted as a sustainability enabler by improving recovery confidence
+- Allocation-method choice (cut-off vs system expansion) materially affects impact narratives and must be transparently acknowledged
+
+## Chapter 5. Reliability, FMEA, and Architecture Optimization
+
+### 5.1 FMEA Method
+Risk prioritisation followed RPN = Severity × Occurrence × Detection.  
+Critical risks were linked to mitigation evidence from bench and tank validation.
+
+### 5.2 High-Priority Risk Reflection
+The top intelligence risk was TinyML false-negative under constrained edge conditions (INT8 + memory limits).  
+A hybrid architecture (TinyML + rule-based watchdog) was retained to distribute failure domains instead of shifting risk to a single cloud-dependent path.
+
+### 5.3 Power and Communication Reliability
+Dual-battery isolation and context-aware communication strategy were used to reduce power noise, preserve mission endurance, and improve link robustness.
+
+## Chapter 6. Conclusion
+
+This project demonstrates that embedding edge intelligence into legacy hardware can be a practical **sustainability strategy**, not only a technical upgrade.  
+It enabled circular reuse, improved mission-level observability, and supported real-world environmental stewardship goals while maintaining a critical view of unresolved risk and data limitations.
+
+## Quantitative Highlights
+
+- TinyML INT8 model size: **5.64 KB**
+- Classification accuracy: **96.03%**
 - Macro F1: **0.7967**
-- ESP32 추론 지연: **약 1 ms**
+- LoRa PDR at 100 m: **94.2%**
+- End-to-end dashboard latency: **~1.85 s**
+- Intelligence high-priority FMEA risk: **RPN 160**
 
-### 통신/시스템 검증
-- LoRa 100m 구간 PDR: **94.2%**
-- 종단 지연(탐지→대시보드): **평균 1.85초**
-- HIL 검증: 이상 탐지 후 약 **1.2초** 내 긴급 상태 전환 트리거
+## Assessment Summary (Provided)
 
-## 5) 저장소 구조
+- **Project impact:** 70  
+  Excellent linkage between technical design and societal impact in Lake Victoria.
+- **Communication:** 70  
+  Strong chapter flow, professional writing, and consistent academic tone.
+- **Project management / values:** 75  
+  Strong reflection on Gantt→Kanban transition and stakeholder/value trade-offs.
+- **Sustainability:** 75  
+  Strong systems framing (Doughnut + CLD) and SDG interdependency analysis.
+- **LCA:** 70  
+  Clear circular strategy, quantitative scenario comparison, and allocation-method critique.
+- **FMEA:** 70  
+  Rigorous risk prioritisation with mitigation evidence and architecture linkage.
 
-- `submarine-test/` : STM32CubeIDE 기반 펌웨어 프로젝트
-- `submarine_dev/` : TinyML 학습/양자화/시뮬레이션/ESP32 코드
-  - `simulation/` : 글라이더/게이트웨이 시뮬레이션
-  - `lora_base_station/` : LoRa 베이스 스테이션 스케치
-  - `tflite_test/` : TFLite Micro 추론 테스트
-- 루트 Python 스크립트: 통신/시리얼/시뮬레이션 보조 테스트 코드
+## Repository Structure
 
-## 6) 참고 이미지
+- `submarine-test/` — STM32CubeIDE firmware project
+- `submarine_dev/` — TinyML training, quantization, simulation, and ESP32 integration
+  - `simulation/` — glider and gateway simulations
+  - `lora_base_station/` — LoRa base-station sketch
+  - `tflite_test/` — TFLite Micro inference test
+- Root Python scripts — serial/comms/simulation support utilities
+
+## Reference Images
 
 ![test-ucl](https://github.com/user-attachments/assets/fa977f7b-3119-4786-85b9-683699786343)
 ![lipstick-battery](https://github.com/user-attachments/assets/ebf3c85a-7f7b-41c1-b9d1-114b3c05451d)
