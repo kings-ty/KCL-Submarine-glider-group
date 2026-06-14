@@ -1,138 +1,100 @@
-# KCL Submarine Glider Group
+# 🌊 Autonomous Submarine Glider — Edge AI & Telemetry Stack
 
-Autonomous underwater glider project for **water-quality monitoring in Lake Victoria** using a circular reuse strategy, TinyML edge intelligence, and LoRa-based telemetry.
+> **Lake Victoria Water Quality Monitor** — Autonomous underwater glider with on-board TinyML anomaly detection, dual-ESP32 LoRa telemetry, and real-time Azure IoT dashboard. Built for environmental monitoring in freshwater conditions where satellite telemetry fails and cloud inference is impractical.
 
-This README is written in English from your final report content and assessment feedback.
+**My Role:** Lead — Intelligence & Communication Layers (ESP32 firmware, TinyML pipeline, LoRa bridge, Azure dashboard)
+**Team:** 3 members · Hardware/STM32 control by teammate · KCL MSc Capstone · **Individual Distinction**
 
-## Chapter 1. Introduction
+---
 
-### 1.1 Problem Statement and Societal Relevance
-Lake Victoria supports over 42 million livelihoods but is increasingly threatened by untreated wastewater and agricultural runoff.  
-The project addresses this challenge through a low-cost, low-impact autonomous monitoring platform aligned with **SDG 6 (Clean Water)** and **SDG 14 (Life Below Water)**.
+## What I Built
 
-### 1.2 Pre-study and Design Validation
-Early Python simulations were used to validate buoyancy engine parameters and confirm the feasibility of sawtooth trajectory operation for the glider mass profile.
+```
+[ESP32-S3 Intelligence Hub]
+    ├── 4× water quality sensors (pH, DO, EC, Temp) @ 10 Hz → circular FIFO
+    ├── TinyML DNN (30→32→16→4) — INT8 quantised, 5.64 KB, ~1 ms/inference
+    │     └── Classes: NORMAL / ENV-ANOMALY / SENSOR-FAULT / NAV-DRIFT
+    ├── Rule-based watchdog (fallback when confidence < 85%)
+    └── STATE_EMERGENCY → STM32 via UART (buoyancy release trigger)
 
-### 1.3 Individual Contribution and Technical Justification
-The core contribution focused on the **intelligence and communication layers**:
-- Multi-board distributed architecture (ESP32 for AI/comms + STM32 for control/sensing)
-- Dual-ESP32 LoRa bridge for robust, low-cost telemetry
-- TinyML anomaly detection for on-board prioritisation of critical events
+[Dual-ESP32 LoRa Bridge]
+    ├── Submerged node (SX1276, 868 MHz, 14 dBm) — surface-burst on ascent > 0.2 m
+    ├── Shore relay → Serial-to-USB → Python gateway
+    └── Microsoft Azure IoT Hub → real-time dashboard
 
-This software stack was essential for reliable recovery, enabling circular reuse of the 17.5 kg steel pressure hull from the 2025 platform.
+[Dual-Battery Isolation]
+    ├── Main pack → actuator + motor (dirty domain)
+    └── Lipstick cell (5V, 3000 mAh) → ESP32 + LoRa + sensors (clean domain)
+          ~48h operating time under duty-cycled inference
+```
 
-### 1.4 Reflective Analysis Framework
-The report reflects on system impact through project management, values/stakeholder analysis, sustainability ethics, LCA, and reliability (FMEA).  
-A central finding is that TinyML+LoRa both enables reuse and introduces top-priority risk requiring hybrid fail-safe logic.
+---
 
-## Chapter 2. Project Management, Values Thinking, and Stakeholder Dialogue
+## Why These Design Decisions
 
-### 2.1 Project Management and Technical Leadership
-- Initial planning: WBS + Gantt for deliverables and critical path
-- Mid-project pivot: Kanban Agile due to procurement delays and dependency uncertainty
-- Team enablement: strength-based delegation, preconfigured environments, and SOP-driven collaboration
+**LoRa over satellite** — Persistent tropical cloud cover degrades satellite reliability over Lake Victoria. LoRa at 868 MHz is cost-independent and cloud-independent. At 1–2 m depth in freshwater, RF attenuation is low enough for submerged transmission — eliminating the energy cost of full surface breach.
 
-### 2.2 Values Thinking: Efficiency vs Responsibility
-Low-cost rapid prototyping (PLA parts) improved feasibility, but ethical trade-offs were explicitly considered (microplastic risk, material lifecycle limits).  
-Prototype decisions prioritized practical deployment while planning transition to more sustainable production materials.
+**TinyML on-device over cloud inference** — AUVs face extreme data scarcity and power constraints. Transmitting raw sensor streams to cloud is incompatible with a 48h battery budget. INT8 quantisation shrinks the model 4× (22.56 KB → 5.64 KB) with 3× inference speedup and only marginal accuracy loss.
 
-### 2.3 Stakeholder Dialogue
-The design balanced:
-- **Fishers / marine biologists**: strong in-situ sensing coverage
-- **Regulators**: habitat safety and recoverability requirements
+**Hybrid fallback (TinyML + rule-based watchdog)** — A pure TinyML approach risks false-negatives under INT8 precision limits. A pure rule-based approach misses complex multi-sensor anomaly patterns. The hybrid distributes failure domains: neither layer alone can silence the emergency path.
 
-Fail-to-float and LoRa-based recovery strategy established a non-intrusive middle-ground solution.
+**Galvanic isolation** — Propulsion EMI contaminates analog sensor readings. Separate power domains prevent fault propagation from the intelligence layer to vehicle control.
 
-## Chapter 3. Sustainability and Ethics
+---
 
-### 3.1 Doughnut Framing and Systems Perspective
-The project was mapped to environmental boundaries and social foundations, linking biosphere protection with equitable access to water-quality intelligence.
+## Performance
 
-### 3.2 Causal-Loop Insight
-- **Reinforcing loop (R1):** better intelligence → better recovery → better asset reuse → lower per-mission impact
-- **Balancing loop (B1):** higher data frequency → higher energy demand → battery constraints
+| Metric | Value |
+|--------|-------|
+| TinyML model size (INT8) | **5.64 KB** |
+| Test accuracy | **96.03%** |
+| Macro F1 | **0.7967** |
+| Inference latency | **~1 ms** |
+| LoRa PDR @ 100 m | **94.2%** |
+| Average RSSI (submerged) | **−105 dBm** |
+| End-to-end detection → Azure dashboard | **1.85 s** |
+| Emergency response (anomaly → STATE_EMERGENCY) | **1.2 s** |
+| Logic layer operating time | **~48 h** |
 
-### 3.3 Circular Economy Strategy
-Hybrid material strategy:
-- Reused high-mass steel hull (long-life structural asset)
-- Replaceable lightweight components for adaptation
-- Software intelligence as a life-extension multiplier for physical assets
+---
 
-### 3.4 Reflective Ethics and SDG Trade-offs
-Key reflections included SDG synergies/trade-offs, data transparency vs operational security, and governance needs for responsible open environmental data.
+## Technical Stack
 
-### 3.5 Professional Ethics
-Engineering decisions were framed around integrity, environmental respect, rigor, and communication/leadership principles.
+| Layer | Tech |
+|-------|------|
+| Edge AI | TFLite Micro (ESP32), INT8 post-training quantisation, 30-32-16-4 DNN |
+| Training data | InWaterSense + AUV navigation dataset, custom augmentation |
+| Communication | SX1276 LoRa 868 MHz, dual-ESP32 bridge, custom packet protocol |
+| Cloud | Microsoft Azure IoT Hub, Python gateway |
+| Firmware | ESP32-S3 (Arduino/ESP-IDF), STM32 (bare-metal C, UART/SPI) |
+| Dashboard | React/TypeScript, Web Serial API, 60+ FPS real-time visualisation |
 
-## Chapter 4. Life Cycle Assessment (LCA)
-
-### 4.1 Method and Circular Baseline
-ISO 14040-style framing was applied to compare:
-- Circular reuse strategy (2026 upgrade)
-- Full-manufacture baseline
-- Alternative composite-hull scenario
-
-Functional unit: one successful 48-hour monitoring mission, amortised across a 50-mission design life.
-
-### 4.2 Key LCA Interpretation
-- Circular reuse significantly reduced total impact versus full-manufacture assumptions
-- Intelligence layer (TinyML + LoRa) acted as a sustainability enabler by improving recovery confidence
-- Allocation-method choice (cut-off vs system expansion) materially affects impact narratives and must be transparently acknowledged
-
-## Chapter 5. Reliability, FMEA, and Architecture Optimization
-
-### 5.1 FMEA Method
-Risk prioritisation followed RPN = Severity × Occurrence × Detection.  
-Critical risks were linked to mitigation evidence from bench and tank validation.
-
-### 5.2 High-Priority Risk Reflection
-The top intelligence risk was TinyML false-negative under constrained edge conditions (INT8 + memory limits).  
-A hybrid architecture (TinyML + rule-based watchdog) was retained to distribute failure domains instead of shifting risk to a single cloud-dependent path.
-
-### 5.3 Power and Communication Reliability
-Dual-battery isolation and context-aware communication strategy were used to reduce power noise, preserve mission endurance, and improve link robustness.
-
-## Chapter 6. Conclusion
-
-This project demonstrates that embedding edge intelligence into legacy hardware can be a practical **sustainability strategy**, not only a technical upgrade.  
-It enabled circular reuse, improved mission-level observability, and supported real-world environmental stewardship goals while maintaining a critical view of unresolved risk and data limitations.
-
-## Quantitative Highlights
-
-- TinyML INT8 model size: **5.64 KB**
-- Classification accuracy: **96.03%**
-- Macro F1: **0.7967**
-- LoRa PDR at 100 m: **94.2%**
-- End-to-end dashboard latency: **~1.85 s**
-- Intelligence high-priority FMEA risk: **RPN 160**
-
-## Assessment Summary (Provided)
-
-- **Project impact:** 70  
-  Excellent linkage between technical design and societal impact in Lake Victoria.
-- **Communication:** 70  
-  Strong chapter flow, professional writing, and consistent academic tone.
-- **Project management / values:** 75  
-  Strong reflection on Gantt→Kanban transition and stakeholder/value trade-offs.
-- **Sustainability:** 75  
-  Strong systems framing (Doughnut + CLD) and SDG interdependency analysis.
-- **LCA:** 70  
-  Clear circular strategy, quantitative scenario comparison, and allocation-method critique.
-- **FMEA:** 70  
-  Rigorous risk prioritisation with mitigation evidence and architecture linkage.
+---
 
 ## Repository Structure
 
-- `submarine-test/` — STM32CubeIDE firmware project
-- `submarine_dev/` — TinyML training, quantization, simulation, and ESP32 integration
-  - `simulation/` — glider and gateway simulations
-  - `lora_base_station/` — LoRa base-station sketch
-  - `tflite_test/` — TFLite Micro inference test
-- Root Python scripts — serial/comms/simulation support utilities
+```
+submarine_dev/
+├── simulation/          # Glider trajectory & gateway simulations
+├── lora_base_station/   # Shore relay sketch (ESP32)
+├── tflite_test/         # TFLite Micro inference validation
+└── training/            # Model training, quantisation, INT8 export
 
-## Reference Images
+submarine-test/          # STM32CubeIDE firmware (teammate — control/sensing)
+```
 
-![test-ucl](https://github.com/user-attachments/assets/fa977f7b-3119-4786-85b9-683699786343)
-![lipstick-battery](https://github.com/user-attachments/assets/ebf3c85a-7f7b-41c1-b9d1-114b3c05451d)
-![monitoring](https://github.com/user-attachments/assets/d98f4bd2-8ca5-4738-a45c-ae644dd94472)
-![WhatsApp Image 2026-04-03 at 17 12 19](https://github.com/user-attachments/assets/746e3bb6-1338-476e-b979-9734b06d545d)
+---
+
+## Key Engineering Trade-offs
+
+**INT8 quantisation risk (FMEA RPN 160)** — The highest-priority system risk. INT8 reduces precision, and open-water validation data for rapid pressure transients doesn't exist yet. Mitigated by the hybrid fallback, but not eliminated. Future work: open-water field deployment in Lake Victoria to build real anomaly training data.
+
+**Circular reuse strategy** — The 17.5 kg steel pressure hull was reused from the 2025 platform. The intelligence layer is not optional here — without reliable anomaly detection and telemetry, hull loss becomes an environmental liability (17.5 kg of permanent marine debris). TinyML + LoRa is the sustainability enabler, not just a feature.
+
+---
+
+## Assessment
+
+**Individual Distinction** · KCL MSc Robotics Capstone 2026
+
+*Assessed on: Project impact (70) · Communication (70) · Project management (75) · Sustainability (75) · LCA (70) · FMEA (70)*
